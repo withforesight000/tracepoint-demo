@@ -2,6 +2,13 @@
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct TaskRel {
+    pub pid: u32,
+    pub ppid: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct ExecEvent {
     pub ktime_ns: u64,
     pub pid: u32,

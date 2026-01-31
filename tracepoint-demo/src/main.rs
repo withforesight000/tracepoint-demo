@@ -1,17 +1,82 @@
-use std::{convert::TryFrom, env, mem};
+use std::{
+    collections::{HashMap as StdHashMap, HashSet, VecDeque},
+    convert::TryFrom,
+    env,
+    io::Read,
+    mem,
+};
 
 use aya::{
+    Btf, Ebpf,
     maps::{RingBuf, hash_map::HashMap as UserHashMap},
-    programs::TracePoint,
+    programs::{Iter, TracePoint},
 };
 use log::debug;
 use tokio::{io::unix::AsyncFd, select, signal};
 
-use tracepoint_demo_common::{EXEC_EVENTS_MAP, ExecEvent, PROC_FLAG_WATCH_SELF, WATCH_PIDS_MAP};
+use tracepoint_demo_common::{
+    EXEC_EVENTS_MAP, ExecEvent, PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF, TaskRel,
+    WATCH_PIDS_MAP,
+};
 
 fn cstr_from_u8(bytes: &[u8]) -> String {
     let len = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..len]).into_owned()
+}
+
+fn seed_proc_state_from_task_iter(ebpf: &mut Ebpf, roots: &[(u32, u32)]) -> anyhow::Result<()> {
+    let mut watch_pids: UserHashMap<_, u32, u32> =
+        UserHashMap::try_from(ebpf.map_mut("WATCH_PIDS").unwrap())?;
+    for (pid, flags) in roots {
+        watch_pids.insert(*pid, *flags, 0)?;
+    }
+
+    let btf = Btf::from_sys_fs()?;
+    let program: &mut Iter = ebpf.program_mut("iter_tasks").unwrap().try_into()?;
+    program.load("task", &btf)?;
+    let link_id = program.attach()?;
+    let link = program.take_link(link_id)?;
+    let mut file = link.into_file()?;
+
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+
+    let mut children: StdHashMap<u32, Vec<u32>> = StdHashMap::new();
+    for chunk in buf.chunks_exact(mem::size_of::<TaskRel>()) {
+        let pid = u32::from_ne_bytes(chunk[0..4].try_into().unwrap());
+        let ppid = u32::from_ne_bytes(chunk[4..8].try_into().unwrap());
+        children.entry(ppid).or_default().push(pid);
+    }
+
+    let mut proc_state: UserHashMap<_, u32, u32> =
+        UserHashMap::try_from(ebpf.map_mut("PROC_STATE").unwrap())?;
+
+    for (root_pid, flags) in roots {
+        proc_state.insert(root_pid, flags, 0)?;
+
+        if (flags & PROC_FLAG_WATCH_CHILDREN) == 0 {
+            continue;
+        }
+
+        let mut q = VecDeque::new();
+        let mut seen = HashSet::new();
+
+        q.push_back(*root_pid);
+        seen.insert(*root_pid);
+
+        while let Some(ppid) = q.pop_front() {
+            if let Some(ch) = children.get(&ppid) {
+                for &cpid in ch {
+                    if seen.insert(cpid) {
+                        proc_state.insert(&cpid, flags, 0)?;
+                        q.push_back(cpid);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -57,6 +122,25 @@ async fn main() -> anyhow::Result<()> {
         program.load()?;
         program.attach("syscalls", "sys_enter_execve")?;
     }
+
+    {
+        let fork: &mut TracePoint = ebpf.program_mut("on_fork").unwrap().try_into()?;
+        fork.load()?;
+        fork.attach("sched", "sched_process_fork")?;
+    }
+
+    {
+        let exit: &mut TracePoint = ebpf.program_mut("on_exit").unwrap().try_into()?;
+        exit.load()?;
+        exit.attach("sched", "sched_process_exit")?;
+    }
+
+    let mut roots = Vec::<(u32, u32)>::new();
+    for &pid in &pids {
+        roots.push((pid, PROC_FLAG_WATCH_CHILDREN | PROC_FLAG_WATCH_SELF));
+    }
+
+    seed_proc_state_from_task_iter(&mut ebpf, &roots)?;
 
     {
         let map = ebpf

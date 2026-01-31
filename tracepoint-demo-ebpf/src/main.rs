@@ -1,17 +1,20 @@
 #![no_std]
 #![no_main]
 
+use core::ffi::c_void;
+
 use aya_ebpf::{
+    bindings::seq_file,
     helpers::{
         bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns,
-        bpf_probe_read_user, bpf_probe_read_user_str_bytes,
+        bpf_probe_read_user, bpf_probe_read_user_str_bytes, generated::bpf_seq_write,
     },
     macros::{map, tracepoint},
     maps::{hash_map::HashMap, per_cpu_array::PerCpuArray, ring_buf::RingBuf},
     programs::TracePointContext,
 };
 
-use tracepoint_demo_common::{ExecEvent, PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF};
+use tracepoint_demo_common::{ExecEvent, PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF, TaskRel};
 
 // aya-tool で生成した BTF 由来の型定義
 #[allow(
@@ -22,11 +25,14 @@ use tracepoint_demo_common::{ExecEvent, PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATC
     non_upper_case_globals,
     improper_ctypes_definitions,
     unsafe_op_in_unsafe_fn,
+    unnecessary_transmutes
 )]
 #[rustfmt::skip]
 mod vmlinux;
 
-use vmlinux::trace_event_raw_sys_enter;
+use crate::vmlinux::{
+    bpf_iter__task, trace_event_raw_sched_process_fork, trace_event_raw_sys_enter,
+};
 
 #[map]
 static EXEC_EVENTS: RingBuf = RingBuf::with_byte_size(64 * 1024, 0);
@@ -135,6 +141,91 @@ unsafe fn try_tracepoint_demo(ctx: TracePointContext) -> Result<u32, i64> {
     }
 
     Ok(0)
+}
+
+#[tracepoint]
+pub fn on_fork(ctx: TracePointContext) -> u32 {
+    match unsafe { try_on_fork(ctx) } {
+        Ok(_) => 0,
+        Err(_) => 0,
+    }
+}
+
+unsafe fn try_on_fork(ctx: TracePointContext) -> Result<(), i64> {
+    let raw: trace_event_raw_sched_process_fork = unsafe { ctx.read_at(0) }?;
+
+    let ppid = raw.parent_pid as u32;
+    let cpid = raw.child_pid as u32;
+
+    let mut flags_opt: Option<u32> = None;
+
+    if let Some(flags) = unsafe { PROC_STATE.get(ppid) } {
+        flags_opt = Some(*flags);
+    } else if let Some(flags) = unsafe { WATCH_PIDS.get(ppid) } {
+        flags_opt = Some(*flags);
+        let _ = PROC_STATE.insert(ppid, *flags, 0);
+    }
+
+    let flags = match flags_opt {
+        Some(f) => f,
+        None => return Ok(()),
+    };
+
+    if (flags & PROC_FLAG_WATCH_CHILDREN) != 0 {
+        let _ = PROC_STATE.insert(cpid, flags, 0);
+    }
+    Ok(())
+}
+
+#[tracepoint]
+pub fn on_exit(_ctx: TracePointContext) -> u32 {
+    let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    let _ = PROC_STATE.remove(&pid);
+    0
+}
+
+/// # Safety
+///
+/// This function is called by the BPF subsystem.
+#[unsafe(link_section = "iter/task")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iter_tasks(ctx: *mut bpf_iter__task) -> i32 {
+    if ctx.is_null() {
+        return 0;
+    }
+    unsafe {
+        let meta = (*ctx).__bindgen_anon_1.meta;
+        if meta.is_null() {
+            return 0;
+        }
+        let seq = (*meta).__bindgen_anon_1.seq as *mut seq_file;
+        if seq.is_null() {
+            return 0;
+        }
+
+        let task = (*ctx).__bindgen_anon_2.task;
+        if task.is_null() {
+            return 0;
+        }
+
+        let pid = (*task).pid as u32;
+
+        let parent = (*task).real_parent;
+        let ppid = if parent.is_null() {
+            0
+        } else {
+            (*parent).pid as u32
+        };
+
+        let rel: TaskRel = TaskRel { pid, ppid };
+        let _ = bpf_seq_write(
+            seq,
+            &rel as *const _ as *const c_void,
+            core::mem::size_of::<TaskRel>() as u32,
+        );
+
+        0
+    }
 }
 
 #[cfg(not(test))]
