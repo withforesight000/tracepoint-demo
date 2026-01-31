@@ -7,15 +7,11 @@ use aya_ebpf::{
         bpf_probe_read_user, bpf_probe_read_user_str_bytes,
     },
     macros::{map, tracepoint},
-    maps::{hash_map::HashMap, ring_buf::RingBuf},
+    maps::{hash_map::HashMap, per_cpu_array::PerCpuArray, ring_buf::RingBuf},
     programs::TracePointContext,
 };
 
-use tracepoint_demo_common::{
-    ExecEvent,
-    PROC_FLAG_WATCH_SELF,
-    PROC_FLAG_WATCH_CHILDREN,
-};
+use tracepoint_demo_common::{ExecEvent, PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF};
 
 // aya-tool で生成した BTF 由来の型定義
 #[allow(
@@ -41,6 +37,13 @@ static WATCH_PIDS: HashMap<u32, u32> = HashMap::with_max_entries(1024, 0);
 #[map]
 static PROC_STATE: HashMap<u32, u32> = HashMap::with_max_entries(8192, 0);
 
+// per-CPU temporary buffers for filename and argv0 to avoid exceeding BPF stack limits
+#[map]
+static FNAME_BUF: PerCpuArray<[u8; 128]> = PerCpuArray::with_max_entries(1, 0);
+
+#[map]
+static ARGV0_BUF: PerCpuArray<[u8; 128]> = PerCpuArray::with_max_entries(1, 0);
+
 #[tracepoint]
 pub fn tracepoint_demo(ctx: TracePointContext) -> u32 {
     match unsafe { try_tracepoint_demo(ctx) } {
@@ -62,6 +65,13 @@ unsafe fn try_tracepoint_demo(ctx: TracePointContext) -> Result<u32, i64> {
 
     let mut flags_opt: Option<u32> = None;
 
+    // implement the process-watch lookup and caching logic used to decide whether
+    // to monitor the current PID:
+    // - First check PROC_STATE (a per-PID cache) for existing watch flags.
+    // - If not found, fall back to WATCH_PIDS (a userspace-managed map) and, when present,
+    //   copy (promote) the flags into PROC_STATE so subsequent events for the same PID are
+    //   resolved quickly on the hot path.
+    // - If neither map contains flags, the handler returns early and does not emit an event.
     if let Some(flags) = unsafe { PROC_STATE.get(pid) } {
         flags_opt = Some(*flags);
     } else if let Some(flags) = unsafe { WATCH_PIDS.get(pid) } {
@@ -77,23 +87,34 @@ unsafe fn try_tracepoint_demo(ctx: TracePointContext) -> Result<u32, i64> {
     let _watch_self = (flags & PROC_FLAG_WATCH_SELF) != 0;
     let _watch_children = (flags & PROC_FLAG_WATCH_CHILDREN) != 0;
 
+    // Collect process name
     let mut comm = [0u8; 16];
     if let Ok(c) = bpf_get_current_comm() {
         comm = c;
     }
 
+    // Read filename into per-CPU buffer slot 0, then copy into local array for the event
     let mut filename = [0u8; 128];
     let filename_addr = raw.args[0] as *const u8;
     if !filename_addr.is_null() {
-        let _ = unsafe { bpf_probe_read_user_str_bytes(filename_addr, &mut filename) };
+        if let Some(ptr) = FNAME_BUF.get_ptr_mut(0) {
+            let buf = unsafe { &mut *ptr };
+            let _ = unsafe { bpf_probe_read_user_str_bytes(filename_addr, buf) };
+            filename = *buf;
+        }
     }
 
+    // Read argv0 into per-CPU buffer slot 0, then copy into local array for the event
     let mut argv0 = [0u8; 128];
     let argv_ptr = raw.args[1] as *const *const u8;
     if !argv_ptr.is_null() {
         if let Ok(arg0_ptr) = unsafe { bpf_probe_read_user::<*const u8>(argv_ptr) } {
             if !arg0_ptr.is_null() {
-                let _ = unsafe { bpf_probe_read_user_str_bytes(arg0_ptr, &mut argv0) };
+                if let Some(ptr) = ARGV0_BUF.get_ptr_mut(0) {
+                    let buf = unsafe { &mut *ptr };
+                    let _ = unsafe { bpf_probe_read_user_str_bytes(arg0_ptr, buf) };
+                    argv0 = *buf;
+                }
             }
         }
     }
