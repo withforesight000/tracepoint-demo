@@ -1,37 +1,101 @@
 # tracepoint-demo
+tracepoint-demo is a Rust + Aya workspace that demonstrates how to attach eBPF tracepoints to
+`sys_enter_execve` so you can observe every `execve` syscall issued by a configurable set of
+processes. The user-space binary builds and loads the BPF object, manages the watch maps, seeds the
+process tree with `iter_tasks`, and prints the events that the kernel program emits through a ring
+buffer in near real time.
+
+## Repository layout
+
+- `tracepoint-demo` builds the user-space daemon. It drives the `AYA` build integration, opens the
+  `EXEC_EVENTS` ring buffer, pushes PIDs into `WATCH_PIDS`, seeds the `PROC_STATE` cache by running
+  the `iter/task` helper, and reads the captured `ExecEvent` records asynchronously using Tokio.
+- `tracepoint-demo-ebpf` houses the BPF programs: a `tracepoint_demo` handler attached to
+  `syscalls:sys_enter_execve`, helpers for `sched:sched_process_fork`/`sched:sched_process_exit`, and
+  an `iter_tasks` program that walks the live kernel task tree. All maps and structs are shared with
+  the common crate.
+- `tracepoint-demo-common` defines the wire format (`ExecEvent`, `TaskRel`), the map names, and the
+  `PROC_FLAG` bits that indicate whether a PID should be watched for itself, its descendants, or both.
 
 ## Prerequisites
 
-1. stable rust toolchains: `rustup toolchain install stable`
-1. nightly rust toolchains: `rustup toolchain install nightly --component rust-src`
-1. (if cross-compiling) rustup target: `rustup target add ${ARCH}-unknown-linux-musl`
-1. (if cross-compiling) LLVM: (e.g.) `brew install llvm` (on macOS)
-1. (if cross-compiling) C toolchain: (e.g.) [`brew install filosottile/musl-cross/musl-cross`](https://github.com/FiloSottile/homebrew-musl-cross) (on macOS)
-1. bpf-linker: `cargo install bpf-linker` (`--no-default-features` on macOS)
-1. aya-tool: `cargo install aya-tool` (required for generating the BTF bindings that power the eBPF tracepoint definitions)
+- Stable Rust toolchain: `rustup toolchain install stable`
+- Nightly Rust with `rust-src`: `rustup toolchain install nightly --component rust-src`
+- BPF linker (needed to compile the eBPF object): `cargo install bpf-linker` (add `--no-default-features`
+  on macOS)
+- `aya-tool` for generating the BTF bindings: `cargo install aya-tool`
+- Root privileges or the equivalent capabilities (`CAP_BPF`, `CAP_PERFMON`, `CAP_SYS_RESOURCE`, etc.)
+  to load, attach, and pin eBPF programs/maps.
+- When cross-compiling from macOS, install the Linux musl target and the C toolchain for your target
+  architecture.
 
-## Build & Run
+## Building
 
-Use `cargo build`, `cargo check`, etc. as normal. Run your program with:
+The `tracepoint-demo` crate uses `tracepoint-demo/build.rs` to invoke `aya-build`, which compiles the
+embedded eBPF crate before the user-space binary. Run:
 
-```shell
-cargo run --release
+```bash
+cargo build --release
 ```
 
-Cargo build scripts are used to automatically build the eBPF correctly and include it in the
-program.
+The resulting binary contains the pre-built BPF object and is ready to load the tracepoints.
+
+## Running
+
+Provide one or more PIDs to trace. You can use the repeated `--pid` flag or pass positional arguments;
+Clap enforces that at least one PID is provided. By default each PID is watched along with any
+descendants discovered either during seeding or via the `sched_process_fork` tracepoint. Use
+`--no-watch-children` to restrict tracing to the given PID without following forks.
+
+```bash
+sudo cargo run --release -- --pid 1234 --pid 9012
+sudo cargo run --release -- 1234 9012 --no-watch-children
+```
+
+Each line of output looks like:
+
+```
+[0.123456] pid=1234 tid=1234 uid=1000 gid=1000 syscall_id=59 comm="bash" filename="/usr/bin/bash" argv0="bash"
+```
+
+`tracepoint-demo` pushes every requested PID (flags=`PROC_FLAG_WATCH_SELF`, plus
+`PROC_FLAG_WATCH_CHILDREN` unless `--no-watch-children` is used) into `WATCH_PIDS`. It then runs the
+`iter/task` helper to populate `PROC_STATE` with the live task hierarchy so the BPF programs can make
+fast decisions on the hot path without repeatedly probing `WATCH_PIDS`.
+
+The `tracepoint_demo` handler caches the watch flags in `PROC_STATE`, copies filename/argv0 strings
+through per-CPU buffers, and reserves an `ExecEvent` slot on the `EXEC_EVENTS` ring buffer. The
+`on_fork`/`on_exit` tracepoints maintain the cache for forks and exits. The user-space binary reads
+the ring buffer via `AsyncFd` and prints each event with timestamp, IDs, credentials, and names. Set
+`RUST_LOG=tracepoint_demo=debug` (or similar) to show the `env_logger` messages emitted by the
+binary.
 
 ## Cross-compiling on macOS
 
-Cross compilation should work on both Intel and Apple Silicon Macs.
+Both Intel and Apple Silicon macOS hosts can cross-compile for Linux targets. Example for `x86_64`:
 
-```shell
+```bash
+ARCH=x86_64
 CC=${ARCH}-linux-musl-gcc cargo build --package tracepoint-demo --release \
   --target=${ARCH}-unknown-linux-musl \
-  --config=target.${ARCH}-unknown-linux-musl.linker=\"${ARCH}-linux-musl-gcc\"
+  --config=target.${ARCH}-unknown-linux-musl.linker="${ARCH}-linux-musl-gcc"
 ```
-The cross-compiled program `target/${ARCH}-unknown-linux-musl/release/tracepoint-demo` can be
-copied to a Linux server or VM and run there.
+
+Swap `ARCH`/linker to `aarch64` as needed. The produced binary is at
+`target/${ARCH}-unknown-linux-musl/release/tracepoint-demo`.
+
+## Generating BTF bindings
+
+`tracepoint-demo-ebpf/src/vmlinux.rs` contains the Aya-generated BTF definitions for the tracepoints
+that the BPF programs depend on. Regenerate them when you change the traced event or build against a
+different kernel:
+
+```bash
+cd tracepoint-demo-ebpf
+aya-tool generate trace_event_raw_sys_enter trace_event_raw_sched_process_fork task_struct bpf_iter_meta bpf_iter__task > src/vmlinux.rs
+```
+
+`aya-tool` is supplied by the Aya toolchain (`cargo install aya-tool`).
 
 ## License
 
@@ -52,21 +116,6 @@ option.
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in this project by you, as defined in the GPL-2 license, shall be
 dual licensed as above, without any additional terms or conditions.
-
-#### BTF generation
-
-The eBPF crate ships `tracepoint-demo-ebpf/src/vmlinux.rs`, which contains
-BTF-derived bindings for the `trace_event_raw_sys_enter` tracepoint layout. The
-file is generated with `aya-tool`:
-
-```shell
-aya-tool generate trace_event_raw_sys_enter > src/vmlinux.rs
-```
-
-Run that command from the `tracepoint-demo-ebpf` directory whenever the kernel
-changes or you alter the traced event; `aya-tool` is provided by the `aya`
-toolchain (`cargo install aya-tool`) and produces the definitions that the
-eBPF program depends on.
 
 [Apache license]: LICENSE-APACHE
 [MIT license]: LICENSE-MIT
