@@ -1,7 +1,6 @@
 use std::{
     collections::{HashMap as StdHashMap, HashSet, VecDeque},
     convert::TryFrom,
-    env,
     io::Read,
     mem,
 };
@@ -11,8 +10,26 @@ use aya::{
     maps::{RingBuf, hash_map::HashMap as UserHashMap},
     programs::{Iter, TracePoint},
 };
+use clap::Parser;
 use log::debug;
 use tokio::{io::unix::AsyncFd, select, signal};
+
+#[derive(Parser)]
+#[command(author, version, about = "Traces execve syscalls for a set of processes", long_about = None)]
+#[command(arg_required_else_help = true)]
+struct CliArgs {
+    /// Repeated `--pid` arguments keep the option-style interface used in earlier versions.
+    #[arg(short = 'p', long = "pid", value_name = "PID")]
+    pid: Vec<u32>,
+
+    /// Positional PIDs can be used instead of `--pid`.
+    #[arg(value_name = "PID", required_unless_present = "pid")]
+    positional_pids: Vec<u32>,
+
+    /// Do not follow child processes when tracing (default traces children as well).
+    #[arg(long = "no-watch-children")]
+    no_watch_children: bool,
+}
 
 use tracepoint_demo_common::{
     EXEC_EVENTS_MAP, ExecEvent, PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF, TaskRel,
@@ -83,14 +100,15 @@ fn seed_proc_state_from_task_iter(ebpf: &mut Ebpf, roots: &[(u32, u32)]) -> anyh
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    let pids: Vec<u32> = env::args()
-        .skip(1)
-        .map(|s| s.parse::<u32>())
-        .collect::<Result<_, _>>()?;
+    let args = CliArgs::parse();
+    let mut pids = args.pid;
+    pids.extend(args.positional_pids);
+    let watch_children = !args.no_watch_children;
 
     if pids.is_empty() {
-        eprintln!("Usage: tracepoint-demo <PID> [PID ...]");
-        eprintln!("  ex) tracepoint-demo 1234 5678");
+        // This should not happen because clap already enforces at least one PID,
+        // but we keep the guard in case the parser changes.
+        eprintln!("Please provide at least one PID (or use `--pid`).");
         return Ok(());
     }
 
@@ -135,9 +153,16 @@ async fn main() -> anyhow::Result<()> {
         exit.attach("sched", "sched_process_exit")?;
     }
 
+    let watch_flags = PROC_FLAG_WATCH_SELF
+        | if watch_children {
+            PROC_FLAG_WATCH_CHILDREN
+        } else {
+            0
+        };
+
     let mut roots = Vec::<(u32, u32)>::new();
     for &pid in &pids {
-        roots.push((pid, PROC_FLAG_WATCH_CHILDREN | PROC_FLAG_WATCH_SELF));
+        roots.push((pid, watch_flags));
     }
 
     seed_proc_state_from_task_iter(&mut ebpf, &roots)?;
@@ -148,7 +173,7 @@ async fn main() -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("map not found"))?;
         let mut watch_pids: UserHashMap<_, u32, u32> = UserHashMap::try_from(map)?;
         for pid in &pids {
-            watch_pids.insert(*pid, PROC_FLAG_WATCH_SELF, 0)?;
+            watch_pids.insert(*pid, watch_flags, 0)?;
         }
     }
 
@@ -158,9 +183,15 @@ async fn main() -> anyhow::Result<()> {
     let ring = RingBuf::try_from(ring_map)?;
     let mut async_ring = AsyncFd::new(ring)?;
 
+    let child_status = if watch_children {
+        "children included"
+    } else {
+        "children ignored"
+    };
+
     println!(
-        "Watching execve syscalls for PIDs: {:?} (Ctrl-C to exit)",
-        pids
+        "Watching execve syscalls for PIDs: {:?} ({}) (Ctrl-C to exit)",
+        pids, child_status
     );
 
     loop {
