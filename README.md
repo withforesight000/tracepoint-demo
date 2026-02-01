@@ -50,11 +50,24 @@ By default each root PID is watched along with any descendants discovered either
 via the `sched_process_fork` tracepoint. Use `--no-watch-children` to restrict tracing to the given
 PID without following forks.
 
+To trace a Docker container, pass `--container <name-or-id>`. The container option can be combined
+with `--pid` and `--tty` (the watch set is the union). If the container exists but is not running,
+the tool waits for a start event before proceeding. Container seeding follows these rules:
+
+- `--no-watch-children`: watch only the container's main PID.
+- Default (`--no-watch-children` absent): seed the main PID plus descendants using `iter_tasks`.
+- `--all-container-processes`: seed every PID currently in the container (from `cgroup.procs`), then
+  rely on `sched_process_fork` to follow new processes. This overrides `--no-watch-children` for
+  the container seed.
+
 ```bash
 sudo cargo run --release -- --pid 1234 --pid 9012
 sudo cargo run --release -- 1234 9012 --no-watch-children
 sudo cargo run --release -- --tty /dev/pts/9
 sudo cargo run --release -- --tty pts9 --tty /dev/tty1
+sudo cargo run --release -- --container my-service
+sudo cargo run --release -- --container my-service --all-container-processes
+sudo cargo run --release -- --container my-service --pid 1234 --tty pts9
 ```
 
 Each line of output looks like:
@@ -70,6 +83,10 @@ terminal so the BPF programs can make fast decisions on the hot path without rep
 `WATCH_PIDS`. When `--tty` is used, the initial snapshot is also used to discover root PIDs that own
 the specified TTY. The filter accepts `/dev/`-prefixed values and normalizes PTY names (e.g.
 `/dev/pts/9` and `pts9` are treated as the same terminal).
+
+When `--container` is used, the container's main PID is added to `WATCH_PIDS`, and `PROC_STATE` is
+seeded either by `iter_tasks` (main PID + descendants) or by reading `cgroup.procs` when
+`--all-container-processes` is set (falling back to `iter_tasks` if the cgroup lookup fails).
 
 The `tracepoint_demo` handler caches the watch flags in `PROC_STATE`, copies filename/argv0 strings
 through per-CPU buffers, and reserves an `ExecEvent` slot on the `EXEC_EVENTS` ring buffer. The
