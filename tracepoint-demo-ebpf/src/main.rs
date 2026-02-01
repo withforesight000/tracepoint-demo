@@ -220,12 +220,10 @@ pub unsafe extern "C" fn iter_tasks(ctx: *mut bpf_iter__task) -> i32 {
 
         if !(*task).signal.is_null() {
             let signal = (*task).signal;
-            if !signal.is_null() {
-                let tty = (*signal).tty;
-                if !tty.is_null() {
-                    let name_ptr = (*tty).name.as_ptr() as *const u8;
-                    let _ = bpf_probe_read_kernel_str_bytes(name_ptr, &mut rel.tty_name);
-                }
+            let tty = (*signal).tty;
+            if !tty.is_null() {
+                let name_ptr = (*tty).name.as_ptr() as *const u8;
+                let _ = bpf_probe_read_kernel_str_bytes(name_ptr, &mut rel.tty_name);
             }
         }
         let _ = bpf_seq_write(
