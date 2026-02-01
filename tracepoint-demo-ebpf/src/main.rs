@@ -6,7 +6,14 @@ use core::ffi::c_void;
 use aya_ebpf::{
     bindings::seq_file,
     helpers::{
-        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns, bpf_probe_read_kernel_str_bytes, bpf_probe_read_user, bpf_probe_read_user_str_bytes, generated::bpf_seq_write
+        bpf_get_current_comm,
+        bpf_get_current_pid_tgid,
+        bpf_get_current_uid_gid,
+        bpf_ktime_get_ns,
+        bpf_probe_read_kernel_str_bytes,
+        bpf_probe_read_user,
+        bpf_probe_read_user_str_bytes,
+        generated::bpf_seq_write,
     },
     macros::{map, tracepoint},
     maps::{hash_map::HashMap, per_cpu_array::PerCpuArray, ring_buf::RingBuf},
