@@ -47,7 +47,6 @@ fn cstr_from_u8(bytes: &[u8]) -> String {
 
 fn normalize_tty_name(tty: &str) -> String {
     let mut name = tty.strip_prefix("/dev/").unwrap_or(tty);
-    name = name.strip_prefix('/').unwrap_or(name);
     if let Some(rest) = name.strip_prefix("pts/") {
         format!("pts{rest}")
     } else {
