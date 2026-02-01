@@ -7,7 +7,7 @@ that the kernel program emits through a ring buffer in near real time.
 
 ## Repository layout
 
-- `tracepoint-demo` builds the user-space daemon. It drives the `AYA` build integration, opens the
+- `tracepoint-demo` builds the user-space daemon. It drives the `Aya` build integration, opens the
   `EXEC_EVENTS` ring buffer, pushes PIDs into `WATCH_PIDS`, seeds the `PROC_STATE` cache by running
   the `iter/task` helper (PID/PPID + controlling terminal), and reads the captured `ExecEvent`
   records asynchronously using Tokio.
