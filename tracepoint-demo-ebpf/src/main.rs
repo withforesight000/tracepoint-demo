@@ -6,15 +6,21 @@ use core::ffi::c_void;
 use aya_ebpf::{
     bindings::seq_file,
     helpers::{
-        bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns,
-        bpf_probe_read_user, bpf_probe_read_user_str_bytes, generated::bpf_seq_write,
+        bpf_get_current_comm,
+        bpf_get_current_pid_tgid,
+        bpf_get_current_uid_gid,
+        bpf_ktime_get_ns,
+        bpf_probe_read_kernel_str_bytes,
+        bpf_probe_read_user,
+        bpf_probe_read_user_str_bytes,
+        generated::bpf_seq_write,
     },
     macros::{map, tracepoint},
     maps::{hash_map::HashMap, per_cpu_array::PerCpuArray, ring_buf::RingBuf},
     programs::TracePointContext,
 };
 
-use tracepoint_demo_common::{ExecEvent, PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF, TaskRel};
+use tracepoint_demo_common::{ExecEvent, PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF, TASK_REL_TTY_NAME_SIZE, TaskRel};
 
 // aya-tool で生成した BTF 由来の型定義
 #[allow(
@@ -217,7 +223,16 @@ pub unsafe extern "C" fn iter_tasks(ctx: *mut bpf_iter__task) -> i32 {
             (*parent).pid as u32
         };
 
-        let rel: TaskRel = TaskRel { pid, ppid };
+        let mut rel: TaskRel = TaskRel { pid, ppid, tty_name: [0u8; TASK_REL_TTY_NAME_SIZE] };
+
+        if !(*task).signal.is_null() {
+            let signal = (*task).signal;
+            let tty = (*signal).tty;
+            if !tty.is_null() {
+                let name_ptr = (*tty).name.as_ptr() as *const u8;
+                let _ = bpf_probe_read_kernel_str_bytes(name_ptr, &mut rel.tty_name);
+            }
+        }
         let _ = bpf_seq_write(
             seq,
             &rel as *const _ as *const c_void,
