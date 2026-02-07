@@ -286,7 +286,7 @@ async fn wait_container_running(
 
         select! {
             maybe_event = events.next() => match maybe_event {
-                Some(Ok(event)) => {
+                Some(Ok(_)) => {
                     continue;
                 }
                 Some(Err(err)) => return Err(err.into()),
