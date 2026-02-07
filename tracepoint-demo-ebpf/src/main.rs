@@ -211,13 +211,15 @@ pub unsafe extern "C" fn iter_tasks(ctx: *mut bpf_iter__task) -> i32 {
             return 0;
         }
 
-        let pid = (*task).pid as u32;
+        // Use thread-group IDs so userspace seeding works at process granularity
+        // (not per-thread/TID granularity).
+        let pid = (*task).tgid as u32;
 
         let parent = (*task).real_parent;
         let ppid = if parent.is_null() {
             0
         } else {
-            (*parent).pid as u32
+            (*parent).tgid as u32
         };
 
         let mut rel: TaskRel = TaskRel {
