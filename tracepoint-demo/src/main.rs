@@ -78,10 +78,10 @@ fn seed_proc_state_from_task_iter(
 ) -> anyhow::Result<Vec<u32>> {
     let btf = Btf::from_sys_fs()?;
     let program: &mut Iter = ebpf.program_mut("iter_tasks").unwrap().try_into()?;
-    if let Err(err) = program.load("task", &btf)
-        && !matches!(err, ProgramError::AlreadyLoaded)
-    {
-        return Err(err.into());
+    if let Err(err) = program.load("task", &btf) {
+        if !matches!(err, ProgramError::AlreadyLoaded) {
+            return Err(err.into());
+        }
     }
     let link_id = program.attach()?;
     let link = program.take_link(link_id)?;
