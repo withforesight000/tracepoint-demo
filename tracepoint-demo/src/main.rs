@@ -273,45 +273,31 @@ async fn wait_container_running(
                 }
 
                 println!("Waiting for container {name_or_id} to start...");
-                // Wait for start or create event.
-                select! {
-                    maybe_event = events.next() => match maybe_event {
-                        Some(Ok(_)) => {
-                            // Got an event, loop back to check status again.
-                        },
-                        Some(Err(err)) => return Err(err.into()),
-                        None => return Err(anyhow::anyhow!(
-                            "Docker event stream ended while waiting for container {name_or_id}."
-                        )),
-                    },
-                    _ = signal::ctrl_c() => return Err(anyhow::anyhow!(
-                        "Interrupted while waiting for container {name_or_id}."
-                    )),
-                }
             }
             Err(err) => {
                 let msg = err.to_string();
                 if msg.contains("No such container") || msg.contains("404") {
                     println!("Waiting for container {name_or_id} to exist...");
-                    // Wait for any event (create, start, etc).
-                    select! {
-                        maybe_event = events.next() => match maybe_event {
-                            Some(Ok(_)) => {
-                                // Got an event, loop back to check status again.
-                            },
-                            Some(Err(err)) => return Err(err.into()),
-                            None => return Err(anyhow::anyhow!(
-                                "Docker event stream ended while waiting for container {name_or_id}."
-                            )),
-                        },
-                        _ = signal::ctrl_c() => return Err(anyhow::anyhow!(
-                            "Interrupted while waiting for container {name_or_id}."
-                        )),
-                    }
                 } else {
                     return Err(err.into());
                 }
             }
+        }
+
+        // Wait for any event (create, start, etc), then loop back to check status.
+        select! {
+            maybe_event = events.next() => match maybe_event {
+                Some(Ok(_)) => {
+                    // Got an event, loop back to check status again.
+                },
+                Some(Err(err)) => return Err(err.into()),
+                None => return Err(anyhow::anyhow!(
+                    "Docker event stream ended while waiting for container {name_or_id}."
+                )),
+            },
+            _ = signal::ctrl_c() => return Err(anyhow::anyhow!(
+                "Interrupted while waiting for container {name_or_id}."
+            )),
         }
     }
 }
