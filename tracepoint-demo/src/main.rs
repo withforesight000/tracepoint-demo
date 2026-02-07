@@ -200,8 +200,10 @@ fn read_cgroup_v2_path(pid: u32) -> anyhow::Result<String> {
         // cgroup v2 line format: "0::/some/path"
         if let Some(rest) = line.strip_prefix("0::") {
             let trimmed = rest.trim();
-            if trimmed.is_empty() {
-                return Ok("/".to_string());
+            if trimmed.is_empty() || trimmed == "/" {
+                return Err(anyhow::anyhow!(
+                    "container is attached to the root cgroup, refusing to seed all host processes"
+                ));
             }
             return Ok(trimmed.to_string());
         }
