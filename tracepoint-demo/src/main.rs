@@ -13,7 +13,7 @@ use aya::{
     maps::{RingBuf, hash_map::HashMap as UserHashMap},
     programs::{Iter, ProgramError, TracePoint},
 };
-use bollard::{Docker, query_parameters::EventsOptions};
+use bollard::{Docker, errors::Error as BollardError, query_parameters::EventsOptions};
 use clap::Parser;
 use futures_util::StreamExt;
 use log::debug;
@@ -150,7 +150,8 @@ fn seed_proc_state_from_task_iter(
         while let Some(ppid) = q.pop_front() {
             if let Some(children) = children.get(&ppid) {
                 for &cpid in children {
-                    if seen.insert(cpid) { // if not seen,
+                    if seen.insert(cpid) {
+                        // if not seen,
                         proc_state.insert(cpid, flags, 0)?;
                         q.push_back(cpid);
                     }
@@ -224,11 +225,7 @@ fn read_cgroup_procs(path: &str) -> anyhow::Result<Vec<u32>> {
     let mut pids = Vec::new();
     for token in content.split_whitespace() {
         let pid: u32 = token.parse().map_err(|err| {
-            anyhow::anyhow!(
-                "invalid pid {} in {}: {err}",
-                token,
-                full_path.display()
-            )
+            anyhow::anyhow!("invalid pid {} in {}: {err}", token, full_path.display())
         })?;
         pids.push(pid);
     }
@@ -296,15 +293,18 @@ async fn wait_container_running(
                 println!("Waiting for container {name_or_id} to start...");
                 wait_for_docker_event(docker, &id, name_or_id, "start", "start").await?;
             }
-            Err(err) => {
-                let msg = err.to_string();
-                if msg.contains("No such container") || msg.contains("404") {
+            Err(err) => match err {
+                BollardError::DockerResponseServerError { status_code, .. }
+                    if status_code == 404 =>
+                {
                     println!("Waiting for container {name_or_id} to exist...");
-                    wait_for_docker_event(docker, name_or_id, name_or_id, "create", "exist").await?;
-                } else {
+                    wait_for_docker_event(docker, name_or_id, name_or_id, "create", "exist")
+                        .await?;
+                }
+                _ => {
                     return Err(err.into());
                 }
-            }
+            },
         }
     }
 }
