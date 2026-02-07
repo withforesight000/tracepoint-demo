@@ -257,17 +257,17 @@ async fn wait_container_running(
                     .clone()
                     .ok_or_else(|| anyhow::anyhow!("Container {} has no id.", name_or_id))?;
 
-                if let Some(state) = inspect.state
-                    && state.running.unwrap_or(false)
-                {
-                    let pid = state.pid.unwrap_or(0);
-                    if pid <= 0 {
-                        return Err(anyhow::anyhow!(
-                            "Container {} returned invalid PID.",
-                            name_or_id
-                        ));
+                if let Some(state) = inspect.state {
+                    if state.running.unwrap_or(false) {
+                        let pid = state.pid.unwrap_or(0);
+                        if pid <= 0 {
+                            return Err(anyhow::anyhow!(
+                                "Container {} returned invalid PID.",
+                                name_or_id
+                            ));
+                        }
+                        return Ok((id, pid as u32));
                     }
-                    return Ok((id, pid as u32));
                 }
 
                 println!("Waiting for container {name_or_id} to start...");
