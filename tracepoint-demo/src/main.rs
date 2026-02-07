@@ -14,29 +14,43 @@ use aya::{
     programs::{Iter, ProgramError, TracePoint},
 };
 use bollard::{Docker, errors::Error as BollardError, query_parameters::EventsOptions};
-use clap::Parser;
+use clap::{ArgGroup, Parser};
 use futures_util::StreamExt;
 use log::debug;
+use tokio::time::{Duration, sleep};
 use tokio::{io::unix::AsyncFd, select, signal};
 
 #[derive(Parser)]
 #[command(author, version, about = "Traces execve syscalls for a set of processes", long_about = None)]
 #[command(arg_required_else_help = true)]
+#[command(group(
+    ArgGroup::new("target")
+        .required(true)
+        .args(["pid", "positional_pids", "tty", "container"])
+))]
 struct CliArgs {
     /// Repeated `--pid` arguments keep the option-style interface used in earlier versions.
     #[arg(short = 'p', long = "pid", value_name = "PID")]
     pid: Vec<u32>,
 
     /// Positional PIDs can be used instead of `--pid`.
-    #[arg(value_name = "PID")]
+    #[arg(value_name = "PID", conflicts_with_all = ["tty", "container"])]
     positional_pids: Vec<u32>,
 
     /// Monitor processes that share the specified controlling terminal.
-    #[arg(long = "tty", value_name = "TTY")]
+    #[arg(
+        long = "tty",
+        value_name = "TTY",
+        conflicts_with_all = ["pid", "positional_pids", "container"]
+    )]
     tty: Vec<String>,
 
     /// Monitor processes inside the specified Docker container (by name or ID).
-    #[arg(long = "container", value_name = "NAME_OR_ID")]
+    #[arg(
+        long = "container",
+        value_name = "NAME_OR_ID",
+        conflicts_with_all = ["pid", "positional_pids", "tty"]
+    )]
     container: Option<String>,
 
     /// Seed all processes currently in the container at startup.
@@ -301,6 +315,37 @@ async fn wait_container_running(
     }
 }
 
+async fn wait_pid_or_tty_targets(
+    ebpf: &mut Ebpf,
+    pids: &[u32],
+    tty_filters: &HashSet<String>,
+    tty_inputs: &[String],
+    watch_flags: u32,
+) -> anyhow::Result<Vec<u32>> {
+    let mut announced = false;
+    loop {
+        let roots = seed_proc_state_from_task_iter(ebpf, pids, tty_filters, watch_flags)?;
+        if !roots.is_empty() {
+            return Ok(roots);
+        }
+
+        if !announced {
+            eprintln!(
+                "No processes matched PID(s) {:?} or tty(s) {:?}. Waiting for a match...",
+                pids, tty_inputs
+            );
+            announced = true;
+        }
+
+        select! {
+            _ = sleep(Duration::from_secs(1)) => {}
+            _ = signal::ctrl_c() => return Err(anyhow::anyhow!(
+                "Interrupted while waiting for matching PID/TTY targets."
+            )),
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -316,11 +361,6 @@ async fn main() -> anyhow::Result<()> {
 
     let mut pids = pid;
     pids.extend(positional_pids);
-
-    if pids.is_empty() && tty_inputs.is_empty() && container.is_none() {
-        eprintln!("At least one PID, TTY, or container must be specified.");
-        std::process::exit(1);
-    }
 
     let mut tty_filters = HashSet::new();
     for tty in &tty_inputs {
@@ -386,11 +426,9 @@ async fn main() -> anyhow::Result<()> {
         watched_roots =
             seed_proc_state_from_task_iter(&mut ebpf, &pids, &tty_filters, watch_flags)?;
         if watched_roots.is_empty() && container.is_none() {
-            eprintln!(
-                "No processes matched PID(s) {:?} or tty(s) {:?}.",
-                &pids, &tty_inputs
-            );
-            std::process::exit(1);
+            watched_roots =
+                wait_pid_or_tty_targets(&mut ebpf, &pids, &tty_filters, &tty_inputs, watch_flags)
+                    .await?;
         }
     }
 
