@@ -235,16 +235,12 @@ fn read_cgroup_procs(path: &str) -> anyhow::Result<Vec<u32>> {
     Ok(pids)
 }
 
-async fn wait_for_docker_event(
+async fn wait_container_running(
     docker: &Docker,
-    container_filter: &str,
-    display_name: &str,
-    event: &str,
-    action: &str,
-) -> anyhow::Result<()> {
+    name_or_id: &str,
+) -> anyhow::Result<(String, u32)> {
     let mut filters = StdHashMap::new();
-    filters.insert("container".to_string(), vec![container_filter.to_string()]);
-    filters.insert("event".to_string(), vec![event.to_string()]);
+    filters.insert("container".to_string(), vec![name_or_id.to_string()]);
     filters.insert("type".to_string(), vec!["container".to_string()]);
 
     let mut events = docker.events(Some(EventsOptions {
@@ -253,24 +249,6 @@ async fn wait_for_docker_event(
         filters: Some(filters),
     }));
 
-    select! {
-        maybe_event = events.next() => match maybe_event {
-            Some(Ok(_)) => Ok(()),
-            Some(Err(err)) => Err(err.into()),
-            None => Err(anyhow::anyhow!(
-                "Docker event stream ended while waiting for container {display_name} to {action}."
-            )),
-        },
-        _ = signal::ctrl_c() => Err(anyhow::anyhow!(
-            "Interrupted while waiting for container {display_name} to {action}."
-        )),
-    }
-}
-
-async fn wait_container_running(
-    docker: &Docker,
-    name_or_id: &str,
-) -> anyhow::Result<(String, u32)> {
     loop {
         match docker.inspect_container(name_or_id, None).await {
             Ok(inspect) => {
@@ -293,20 +271,32 @@ async fn wait_container_running(
                 }
 
                 println!("Waiting for container {name_or_id} to start...");
-                wait_for_docker_event(docker, &id, name_or_id, "start", "start").await?;
             }
             Err(err) => match err {
                 BollardError::DockerResponseServerError { status_code, .. }
                     if status_code == 404 =>
                 {
                     println!("Waiting for container {name_or_id} to exist...");
-                    wait_for_docker_event(docker, name_or_id, name_or_id, "create", "exist")
-                        .await?;
                 }
                 _ => {
                     return Err(err.into());
                 }
             },
+        }
+
+        select! {
+            maybe_event = events.next() => match maybe_event {
+                Some(Ok(event)) => {
+                    continue;
+                }
+                Some(Err(err)) => return Err(err.into()),
+                None => return Err(anyhow::anyhow!(
+                    "Docker event stream ended while waiting for changing container {name_or_id}'s state."
+                )),
+            },
+            _ = signal::ctrl_c() => return Err(anyhow::anyhow!(
+                "Interrupted while waiting for for changing container {name_or_id}'s state."
+            )),
         }
     }
 }
