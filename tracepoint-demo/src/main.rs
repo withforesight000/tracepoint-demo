@@ -325,11 +325,6 @@ async fn main() -> anyhow::Result<()> {
     let mut pids = pid;
     pids.extend(positional_pids);
 
-    if all_container_processes && container.is_none() {
-        eprintln!("--all-container-processes requires --container.");
-        std::process::exit(1);
-    }
-
     if pids.is_empty() && tty_inputs.is_empty() && container.is_none() {
         eprintln!("At least one PID, TTY, or container must be specified.");
         std::process::exit(1);
