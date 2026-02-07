@@ -13,7 +13,7 @@ use aya::{
     maps::{RingBuf, hash_map::HashMap as UserHashMap},
     programs::{Iter, ProgramError, TracePoint},
 };
-use bollard::{Docker, system::EventsOptions};
+use bollard::{Docker, query_parameters::EventsOptions};
 use clap::Parser;
 use futures_util::StreamExt;
 use log::debug;
@@ -248,10 +248,10 @@ async fn wait_for_docker_event(
     filters.insert("event".to_string(), vec![event.to_string()]);
     filters.insert("type".to_string(), vec!["container".to_string()]);
 
-    let mut events = docker.events(Some(EventsOptions::<String> {
+    let mut events = docker.events(Some(EventsOptions {
         since: None,
         until: None,
-        filters,
+        filters: Some(filters),
     }));
 
     select! {
