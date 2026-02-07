@@ -67,9 +67,12 @@ fn normalize_tty_name(tty: &str) -> String {
     }
 }
 
+/// Seed PROC_STATE map by iterating over all tasks and building a parent-child
+/// relationship map. This allows seeding based on PID and TTY filters, including
+/// optionally following child processes.
 fn seed_proc_state_from_task_iter(
     ebpf: &mut Ebpf,
-    pid_roots: &[u32],
+    pid_roots: &[u32], // Root PIDs to seed.
     tty_filters: &HashSet<String>,
     watch_flags: u32,
 ) -> anyhow::Result<Vec<u32>> {
@@ -87,7 +90,9 @@ fn seed_proc_state_from_task_iter(
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)?;
 
+    // Build parent->children map.
     let mut children: StdHashMap<u32, Vec<u32>> = StdHashMap::new();
+    // Build pid->tty map.
     let mut pid_tty: StdHashMap<u32, String> = StdHashMap::new();
     for chunk in buf.chunks_exact(mem::size_of::<TaskRel>()) {
         let rel: TaskRel = unsafe { ptr::read_unaligned(chunk.as_ptr() as *const TaskRel) };
@@ -106,6 +111,7 @@ fn seed_proc_state_from_task_iter(
             .ok_or_else(|| anyhow::anyhow!("map not found"))?,
     )?;
 
+    // Determine which root PIDs to seed based on PID and TTY filters.
     let mut root_flags = StdHashMap::new();
     for &pid in pid_roots {
         root_flags.insert(pid, watch_flags);
@@ -123,6 +129,8 @@ fn seed_proc_state_from_task_iter(
         return Ok(Vec::new());
     }
 
+    // Seed PROC_STATE for root PIDs and optionally their descendants.
+    // Return the list of seeded root PIDs.
     let mut seeded_roots = Vec::new();
 
     for (&root_pid, &flags) in &root_flags {
@@ -142,7 +150,7 @@ fn seed_proc_state_from_task_iter(
         while let Some(ppid) = q.pop_front() {
             if let Some(children) = children.get(&ppid) {
                 for &cpid in children {
-                    if seen.insert(cpid) {
+                    if seen.insert(cpid) { // if not seen,
                         proc_state.insert(cpid, flags, 0)?;
                         q.push_back(cpid);
                     }
@@ -155,6 +163,12 @@ fn seed_proc_state_from_task_iter(
     Ok(seeded_roots)
 }
 
+/// Seed PROC_STATE map directly with the specified PIDs and flags.
+/// The differences vs. `seed_proc_state_from_task_iter` are:
+/// - No TTY filtering.
+/// - No child process following.
+///
+/// This is useful when the exact set of PIDs is already known.
 fn seed_proc_state_direct(ebpf: &mut Ebpf, pids: &[u32], flags: u32) -> anyhow::Result<()> {
     if pids.is_empty() {
         return Ok(());
@@ -182,6 +196,7 @@ fn read_cgroup_v2_path(pid: u32) -> anyhow::Result<String> {
     let content = fs::read_to_string(&path)?;
 
     for line in content.lines() {
+        // cgroup v2 line format: "0::/some/path"
         if let Some(rest) = line.strip_prefix("0::") {
             let trimmed = rest.trim();
             if trimmed.is_empty() {
@@ -194,14 +209,17 @@ fn read_cgroup_v2_path(pid: u32) -> anyhow::Result<String> {
     Err(anyhow::anyhow!("cgroup v2 path not found in {}", path))
 }
 
+/// path assumes a cgroup v2 path like "/some/path", not a full filesystem path.
 fn read_cgroup_procs(path: &str) -> anyhow::Result<Vec<u32>> {
     let mut full_path = PathBuf::from("/sys/fs/cgroup");
     let relative = path.trim_start_matches('/');
     if !relative.is_empty() {
+        // Append relative path components.
         full_path.push(relative);
     }
     full_path.push("cgroup.procs");
 
+    // content: a whitespace-separated list of PIDs
     let content = fs::read_to_string(&full_path)?;
     let mut pids = Vec::new();
     for token in content.split_whitespace() {
@@ -233,6 +251,7 @@ async fn wait_container_running(
         }
     };
 
+    // Get container ID.
     let id = inspect
         .id
         .clone()
@@ -281,7 +300,9 @@ async fn wait_container_running(
     select! {
         maybe_event = events.next() => {
             match maybe_event {
+                // Successful Docker event.
                 Some(Ok(_)) => {}
+                // Error from Docker event stream.
                 Some(Err(err)) => return Err(err.into()),
                 None => {
                     return Err(anyhow::anyhow!(
