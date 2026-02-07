@@ -291,11 +291,11 @@ async fn wait_container_running(
                 }
                 Some(Err(err)) => return Err(err.into()),
                 None => return Err(anyhow::anyhow!(
-                    "Docker event stream ended while waiting for changing container {name_or_id}'s state."
+                    "Docker event stream ended while waiting for container {name_or_id} state to change."
                 )),
             },
             _ = signal::ctrl_c() => return Err(anyhow::anyhow!(
-                "Interrupted while waiting for for changing container {name_or_id}'s state."
+                "Interrupted while waiting for container {name_or_id} state to change."
             )),
         }
     }
