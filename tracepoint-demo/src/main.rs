@@ -236,45 +236,16 @@ fn read_cgroup_procs(path: &str) -> anyhow::Result<Vec<u32>> {
     Ok(pids)
 }
 
-async fn wait_container_running(
+async fn wait_for_docker_event(
     docker: &Docker,
-    name_or_id: &str,
-) -> anyhow::Result<(String, u32)> {
-    let inspect = match docker.inspect_container(name_or_id, None).await {
-        Ok(inspect) => inspect,
-        Err(err) => {
-            let msg = err.to_string();
-            if msg.contains("No such container") || msg.contains("404") {
-                return Err(anyhow::anyhow!("Container {} not found.", name_or_id));
-            }
-            return Err(err.into());
-        }
-    };
-
-    // Get container ID.
-    let id = inspect
-        .id
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("Container {} has no id.", name_or_id))?;
-
-    if let Some(state) = inspect.state
-        && state.running.unwrap_or(false)
-    {
-        let pid = state.pid.unwrap_or(0);
-        if pid <= 0 {
-            return Err(anyhow::anyhow!(
-                "Container {} returned invalid PID.",
-                name_or_id
-            ));
-        }
-        return Ok((id, pid as u32));
-    }
-
-    println!("Waiting for container {name_or_id} to start...");
-
+    container_filter: &str,
+    display_name: &str,
+    event: &str,
+    action: &str,
+) -> anyhow::Result<()> {
     let mut filters = StdHashMap::new();
-    filters.insert("container".to_string(), vec![id.clone()]);
-    filters.insert("event".to_string(), vec!["start".to_string()]);
+    filters.insert("container".to_string(), vec![container_filter.to_string()]);
+    filters.insert("event".to_string(), vec![event.to_string()]);
     filters.insert("type".to_string(), vec!["container".to_string()]);
 
     let mut events = docker.events(Some(EventsOptions::<String> {
@@ -283,61 +254,59 @@ async fn wait_container_running(
         filters,
     }));
 
-    let inspect = docker.inspect_container(&id, None).await?;
-    if let Some(state) = inspect.state
-        && state.running.unwrap_or(false)
-    {
-        let pid = state.pid.unwrap_or(0);
-        if pid <= 0 {
-            return Err(anyhow::anyhow!(
-                "Container {} returned invalid PID after start.",
-                name_or_id
-            ));
-        }
-        return Ok((id, pid as u32));
-    }
-
     select! {
-        maybe_event = events.next() => {
-            match maybe_event {
-                // Successful Docker event.
-                Some(Ok(_)) => {}
-                // Error from Docker event stream.
-                Some(Err(err)) => return Err(err.into()),
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "Docker event stream ended while waiting for container to start."
-                    ));
+        maybe_event = events.next() => match maybe_event {
+            Some(Ok(_)) => Ok(()),
+            Some(Err(err)) => Err(err.into()),
+            None => Err(anyhow::anyhow!(
+                "Docker event stream ended while waiting for container {display_name} to {action}."
+            )),
+        },
+        _ = signal::ctrl_c() => Err(anyhow::anyhow!(
+            "Interrupted while waiting for container {display_name} to {action}."
+        )),
+    }
+}
+
+async fn wait_container_running(
+    docker: &Docker,
+    name_or_id: &str,
+) -> anyhow::Result<(String, u32)> {
+    loop {
+        match docker.inspect_container(name_or_id, None).await {
+            Ok(inspect) => {
+                let id = inspect
+                    .id
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("Container {} has no id.", name_or_id))?;
+
+                if let Some(state) = inspect.state
+                    && state.running.unwrap_or(false)
+                {
+                    let pid = state.pid.unwrap_or(0);
+                    if pid <= 0 {
+                        return Err(anyhow::anyhow!(
+                            "Container {} returned invalid PID.",
+                            name_or_id
+                        ));
+                    }
+                    return Ok((id, pid as u32));
+                }
+
+                println!("Waiting for container {name_or_id} to start...");
+                wait_for_docker_event(docker, &id, name_or_id, "start", "start").await?;
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("No such container") || msg.contains("404") {
+                    println!("Waiting for container {name_or_id} to exist...");
+                    wait_for_docker_event(docker, name_or_id, name_or_id, "create", "exist").await?;
+                } else {
+                    return Err(err.into());
                 }
             }
         }
-        _ = signal::ctrl_c() => {
-            return Err(anyhow::anyhow!(
-                "Interrupted while waiting for container {} to start.",
-                name_or_id
-            ));
-        }
     }
-
-    let inspect = docker.inspect_container(&id, None).await?;
-    let state = inspect
-        .state
-        .ok_or_else(|| anyhow::anyhow!("Container {} has no state.", name_or_id))?;
-    if !state.running.unwrap_or(false) {
-        return Err(anyhow::anyhow!(
-            "Container {} did not start as expected.",
-            name_or_id
-        ));
-    }
-    let pid = state.pid.unwrap_or(0);
-    if pid <= 0 {
-        return Err(anyhow::anyhow!(
-            "Container {} returned invalid PID after start.",
-            name_or_id
-        ));
-    }
-
-    Ok((id, pid as u32))
 }
 
 #[tokio::main]
