@@ -43,16 +43,21 @@ The resulting binary contains the pre-built BPF object and is ready to load the 
 
 ## Running
 
-Provide one or more PIDs to trace, or filter by controlling terminal. You can use the repeated
-`--pid` flag or pass positional arguments. You can also use `--tty` to select processes whose
-controlling terminal matches the given TTY; the value can be repeated to watch multiple terminals.
+Choose exactly one target kind: PID(s), TTY filter(s), or a Docker container.
+
+- PID(s): use repeated `--pid` flags or positional PID arguments.
+- TTY filter(s): use repeated `--tty` values to select processes by controlling terminal.
+- Container: use `--container <name-or-id>`.
+
 By default each root PID is watched along with any descendants discovered either during seeding or
 via the `sched_process_fork` tracepoint. Use `--no-watch-children` to restrict tracing to the given
-PID without following forks.
+root process(es) without following forks.
 
-To trace a Docker container, pass `--container <name-or-id>`. The container option can be combined
-with `--pid` and `--tty` (the watch set is the union). If the container exists but is not running,
-the tool waits for a start event before proceeding. Container seeding follows these rules:
+When PID/TTY-based startup finds no matching roots, the tool waits and retries until a match
+appears (or until interrupted with Ctrl-C).
+
+If a container exists but is not running, the tool waits for a start event before proceeding.
+Container seeding follows these rules:
 
 - `--no-watch-children`: watch only the container's main PID.
 - Default (`--no-watch-children` absent): seed the main PID plus descendants using `iter_tasks`.
@@ -67,7 +72,6 @@ sudo cargo run --release -- --tty /dev/pts/9
 sudo cargo run --release -- --tty pts9 --tty /dev/tty1
 sudo cargo run --release -- --container my-service
 sudo cargo run --release -- --container my-service --all-container-processes
-sudo cargo run --release -- --container my-service --pid 1234 --tty pts9
 ```
 
 Each line of output looks like:
@@ -76,12 +80,11 @@ Each line of output looks like:
 [0.123456] pid=1234 tid=1234 uid=1000 gid=1000 syscall_id=59 comm="bash" filename="/usr/bin/bash" argv0="bash"
 ```
 
-`tracepoint-demo` pushes every requested PID (flags=`PROC_FLAG_WATCH_SELF`, plus
-`PROC_FLAG_WATCH_CHILDREN` unless `--no-watch-children` is used) into `WATCH_PIDS`. It then runs the
-`iter/task` helper to populate `PROC_STATE` with the live task hierarchy and each task's controlling
-terminal so the BPF programs can make fast decisions on the hot path without repeatedly probing
-`WATCH_PIDS`. When `--tty` is used, the initial snapshot is also used to discover root PIDs that own
-the specified TTY. The filter accepts `/dev/`-prefixed values and normalizes PTY names (e.g.
+For PID/TTY mode, `tracepoint-demo` runs the `iter/task` helper to populate `PROC_STATE` with the
+live task hierarchy and each task's controlling terminal so the BPF programs can make fast decisions
+on the hot path without repeatedly probing `WATCH_PIDS`. When `--tty` is used, the snapshot is used
+to discover root PIDs that own the specified TTY. The filter accepts `/dev/`-prefixed values and
+normalizes PTY names (e.g.
 `/dev/pts/9` and `pts9` are treated as the same terminal).
 
 When `--container` is used, the container's main PID is added to `WATCH_PIDS`, and `PROC_STATE` is
