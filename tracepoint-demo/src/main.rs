@@ -39,6 +39,7 @@ struct CliArgs {
 
     /// Monitor processes that share the specified controlling terminal.
     #[arg(
+        short = 't',
         long = "tty",
         value_name = "TTY",
         conflicts_with_all = ["pid", "positional_pids", "container"]
@@ -47,6 +48,7 @@ struct CliArgs {
 
     /// Monitor processes inside the specified Docker container (by name or ID).
     #[arg(
+        short = 'c',
         long = "container",
         value_name = "NAME_OR_ID",
         conflicts_with_all = ["pid", "positional_pids", "tty"]
@@ -54,6 +56,7 @@ struct CliArgs {
     container: Option<String>,
 
     /// Seed all processes currently in the container at startup.
+    /// This is useful to processes to start with `docker exec`.
     #[arg(long = "all-container-processes", requires = "container")]
     all_container_processes: bool,
 
