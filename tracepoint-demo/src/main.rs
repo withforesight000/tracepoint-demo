@@ -34,7 +34,7 @@ struct CliArgs {
     pid: Vec<u32>,
 
     /// Positional PIDs can be used instead of `--pid`.
-    #[arg(value_name = "PID", conflicts_with_all = ["tty", "container"])]
+    #[arg(value_name = "PID", conflicts_with_all = ["pid", "tty", "container"])]
     positional_pids: Vec<u32>,
 
     /// Monitor processes that share the specified controlling terminal.
