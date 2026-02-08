@@ -40,11 +40,12 @@ The resulting binary contains the pre-built BPF object and is ready to load the 
 
 ## Running
 
-Choose exactly one target kind: PID(s), TTY filter(s), or a Docker container.
+Choose exactly one target kind: PID(s), TTY filter(s), a Docker container, or a systemd unit.
 
 - PID(s): use repeated `--pid` flags or positional PID arguments.
 - TTY filter(s): use repeated `--tty` values to select processes by controlling terminal.
 - Container: use `--container <name-or-id>`.
+- systemd unit: use `--systemd-unit <unit-name>`.
 
 By default each root PID is watched along with any descendants discovered either during seeding or
 via the `sched_process_fork` tracepoint. Use `--no-watch-children` to restrict tracing to the given
@@ -62,6 +63,15 @@ Container seeding follows these rules:
   rely on `sched_process_fork` to follow new processes. This overrides `--no-watch-children` for
   the container seed.
 
+If a systemd unit exists but is not active, the tool waits until it becomes active before
+proceeding. Systemd seeding follows these rules:
+
+- `--no-watch-children`: watch only the unit's `MainPID`.
+- Default (`--no-watch-children` absent): seed `MainPID` plus descendants using `iter_tasks`.
+- `--all-systemd-processes`: seed every PID currently in the unit via systemd D-Bus
+  (`GetUnitProcesses`), then rely on `sched_process_fork` to follow new processes. This overrides
+  `--no-watch-children` for the unit seed.
+
 ```bash
 sudo cargo run --release -- --pid 1234 --pid 9012
 sudo cargo run --release -- 1234 9012 --no-watch-children
@@ -69,6 +79,8 @@ sudo cargo run --release -- --tty /dev/pts/9
 sudo cargo run --release -- --tty pts9 --tty /dev/tty1
 sudo cargo run --release -- --container my-service
 sudo cargo run --release -- --container my-service --all-container-processes
+sudo cargo run --release -- --systemd-unit sshd.service
+sudo cargo run --release -- --systemd-unit sshd.service --all-systemd-processes
 ```
 
 Each line of output looks like:
@@ -88,6 +100,12 @@ startup, the program waits and retries until matching tasks appear (or until int
 When `--container` is used, the container's main PID is added to `WATCH_PIDS`, and `PROC_STATE` is
 seeded either by `iter_tasks` (main PID + descendants) or by reading `cgroup.procs` when
 `--all-container-processes` is set (falling back to `iter_tasks` if the cgroup lookup fails).
+
+When `--systemd-unit` is used, the unit is resolved via systemd's D-Bus API. If the unit is not
+active yet, startup waits until it is active. The unit's `MainPID` is added to `WATCH_PIDS` when
+available, and `PROC_STATE` is seeded either by `iter_tasks` (MainPID + descendants) or via
+`GetUnitProcesses` when `--all-systemd-processes` is set (falling back to `iter_tasks` if the D-Bus
+lookup fails and `MainPID` is available).
 
 The `tracepoint_demo` handler caches the watch flags in `PROC_STATE`, copies filename/argv0 strings
 through per-CPU buffers, and reserves an `ExecEvent` slot on the `EXEC_EVENTS` ring buffer. The
