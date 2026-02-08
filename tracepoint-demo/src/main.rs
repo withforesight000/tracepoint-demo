@@ -84,6 +84,17 @@ fn normalize_tty_name(tty: &str) -> String {
     }
 }
 
+fn ensure_task_iter_program_loaded(ebpf: &mut Ebpf) -> anyhow::Result<()> {
+    let btf = Btf::from_sys_fs()?;
+    let program: &mut Iter = ebpf.program_mut("iter_tasks").unwrap().try_into()?;
+    if let Err(err) = program.load("task", &btf) {
+        if !matches!(err, ProgramError::AlreadyLoaded) {
+            return Err(err.into());
+        }
+    }
+    Ok(())
+}
+
 /// Seed PROC_STATE map by iterating over all tasks and building a parent-child
 /// relationship map. This allows seeding based on PID and TTY filters, including
 /// optionally following child processes.
@@ -93,19 +104,15 @@ fn seed_proc_state_from_task_iter(
     tty_filters: &HashSet<String>,
     watch_flags: u32,
 ) -> anyhow::Result<Vec<u32>> {
-    let btf = Btf::from_sys_fs()?;
-    let program: &mut Iter = ebpf.program_mut("iter_tasks").unwrap().try_into()?;
-    if let Err(err) = program.load("task", &btf) {
-        if !matches!(err, ProgramError::AlreadyLoaded) {
-            return Err(err.into());
-        }
-    }
-    let link_id = program.attach()?;
-    let link = program.take_link(link_id)?;
-    let mut file = link.into_file()?;
-
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
+    {
+        let program: &mut Iter = ebpf.program_mut("iter_tasks").unwrap().try_into()?;
+        let link_id = program.attach()?;
+        let link = program.take_link(link_id)?;
+        let mut file = link.into_file()?;
+
+        file.read_to_end(&mut buf)?;
+    }
 
     let pid_roots_set: HashSet<u32> = pid_roots.iter().copied().collect();
     // Determine which root PIDs to seed based on PID and TTY filters.
@@ -415,6 +422,8 @@ async fn main() -> anyhow::Result<()> {
         exit.load()?;
         exit.attach("sched", "sched_process_exit")?;
     }
+
+    ensure_task_iter_program_loaded(&mut ebpf)?;
 
     let watch_flags = PROC_FLAG_WATCH_SELF
         | if watch_children {
