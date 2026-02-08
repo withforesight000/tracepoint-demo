@@ -22,13 +22,10 @@ that the kernel program emits through a ring buffer in near real time.
 
 - Stable Rust toolchain: `rustup toolchain install stable`
 - Nightly Rust with `rust-src`: `rustup toolchain install nightly --component rust-src`
-- BPF linker (needed to compile the eBPF object): `cargo install bpf-linker` (add `--no-default-features`
-  on macOS)
+- BPF linker (needed to compile the eBPF object): `cargo install bpf-linker`
 - `aya-tool` for generating the BTF bindings: `cargo install aya-tool`
 - Root privileges or the equivalent capabilities (`CAP_BPF`, `CAP_PERFMON`, `CAP_SYS_RESOURCE`, etc.)
   to load, attach, and pin eBPF programs/maps.
-- When cross-compiling from macOS, install the Linux musl target and the C toolchain for your target
-  architecture.
 
 ## Building
 
@@ -80,12 +77,13 @@ Each line of output looks like:
 [0.123456] pid=1234 tid=1234 uid=1000 gid=1000 syscall_id=59 comm="bash" filename="/usr/bin/bash" argv0="bash"
 ```
 
-For PID/TTY mode, `tracepoint-demo` runs the `iter/task` helper to populate `PROC_STATE` with the
-live task hierarchy and each task's controlling terminal so the BPF programs can make fast decisions
-on the hot path without repeatedly probing `WATCH_PIDS`. When `--tty` is used, the snapshot is used
-to discover root PIDs that own the specified TTY. The filter accepts `/dev/`-prefixed values and
-normalizes PTY names (e.g.
-`/dev/pts/9` and `pts9` are treated as the same terminal).
+`tracepoint-demo` first runs the `iter/task` helper to populate `PROC_STATE` with the live task
+hierarchy and each task's controlling terminal, then writes discovered root PIDs into `WATCH_PIDS`
+with flags=`PROC_FLAG_WATCH_SELF` (plus `PROC_FLAG_WATCH_CHILDREN` unless `--no-watch-children` is
+used). When `--tty` is used, this startup snapshot is also used to discover root PIDs that own the
+specified TTY. The filter accepts `/dev/`-prefixed values and normalizes PTY names (e.g.
+`/dev/pts/9` and `pts9` are treated as the same terminal). If PID/TTY inputs resolve to no roots at
+startup, the program waits and retries until matching tasks appear (or until interrupted).
 
 When `--container` is used, the container's main PID is added to `WATCH_PIDS`, and `PROC_STATE` is
 seeded either by `iter_tasks` (main PID + descendants) or by reading `cgroup.procs` when
@@ -97,20 +95,6 @@ through per-CPU buffers, and reserves an `ExecEvent` slot on the `EXEC_EVENTS` r
 the ring buffer via `AsyncFd` and prints each event with timestamp, IDs, credentials, and names. Set
 `RUST_LOG=tracepoint_demo=debug` (or similar) to show the `env_logger` messages emitted by the
 binary.
-
-## Cross-compiling on macOS
-
-Both Intel and Apple Silicon macOS hosts can cross-compile for Linux targets. Example for `x86_64`:
-
-```bash
-ARCH=x86_64
-CC=${ARCH}-linux-musl-gcc cargo build --package tracepoint-demo --release \
-  --target=${ARCH}-unknown-linux-musl \
-  --config=target.${ARCH}-unknown-linux-musl.linker="${ARCH}-linux-musl-gcc"
-```
-
-Swap `ARCH`/linker to `aarch64` as needed. The produced binary is at
-`target/${ARCH}-unknown-linux-musl/release/tracepoint-demo`.
 
 ## Generating BTF bindings
 
