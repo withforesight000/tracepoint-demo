@@ -19,6 +19,8 @@ use futures_util::StreamExt;
 use log::debug;
 use tokio::time::{Duration, sleep};
 use tokio::{io::unix::AsyncFd, select, signal};
+use zbus::Error as ZbusError;
+use zbus_systemd::systemd1::{ManagerProxy, ServiceProxy, UnitProxy};
 
 #[derive(Parser)]
 #[command(author, version, about = "Traces execve syscalls for a set of processes", long_about = None)]
@@ -26,7 +28,7 @@ use tokio::{io::unix::AsyncFd, select, signal};
 #[command(group(
     ArgGroup::new("target")
         .required(true)
-        .args(["pid", "positional_pids", "tty", "container"])
+        .args(["pid", "positional_pids", "tty", "container", "systemd_unit"])
 ))]
 struct CliArgs {
     /// Repeated `--pid` arguments keep the option-style interface used in earlier versions.
@@ -34,7 +36,7 @@ struct CliArgs {
     pid: Vec<u32>,
 
     /// Positional PIDs can be used instead of `--pid`.
-    #[arg(value_name = "PID", conflicts_with_all = ["pid", "tty", "container"])]
+    #[arg(value_name = "PID", conflicts_with_all = ["pid", "tty", "container", "systemd_unit"])]
     positional_pids: Vec<u32>,
 
     /// Monitor processes that share the specified controlling terminal.
@@ -42,7 +44,7 @@ struct CliArgs {
         short = 't',
         long = "tty",
         value_name = "TTY",
-        conflicts_with_all = ["pid", "positional_pids", "container"]
+        conflicts_with_all = ["pid", "positional_pids", "container", "systemd_unit"]
     )]
     tty: Vec<String>,
 
@@ -51,7 +53,7 @@ struct CliArgs {
         short = 'c',
         long = "container",
         value_name = "NAME_OR_ID",
-        conflicts_with_all = ["pid", "positional_pids", "tty"]
+        conflicts_with_all = ["pid", "positional_pids", "tty", "systemd_unit"]
     )]
     container: Option<String>,
 
@@ -59,6 +61,19 @@ struct CliArgs {
     /// This is useful to processes to start with `docker exec`.
     #[arg(long = "all-container-processes", requires = "container")]
     all_container_processes: bool,
+
+    /// Monitor processes inside the specified systemd unit.
+    #[arg(
+        short = 'u',
+        long = "systemd-unit",
+        value_name = "UNIT",
+        conflicts_with_all = ["pid", "positional_pids", "tty", "container"]
+    )]
+    systemd_unit: Option<String>,
+
+    /// Seed all processes currently in the systemd unit at startup.
+    #[arg(long = "all-systemd-processes", requires = "systemd_unit")]
+    all_systemd_processes: bool,
 
     /// Do not follow child processes when tracing (default traces children as well).
     #[arg(long = "no-watch-children")]
@@ -216,6 +231,16 @@ fn seed_proc_state_direct(ebpf: &mut Ebpf, pids: &[u32], flags: u32) -> anyhow::
     Ok(())
 }
 
+fn ensure_non_root_cgroup_path(path: &str, label: &str) -> anyhow::Result<()> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return Err(anyhow::anyhow!(
+            "{label} is attached to the root cgroup, refusing to seed all host processes"
+        ));
+    }
+    Ok(())
+}
+
 fn read_cgroup_v2_path(pid: u32) -> anyhow::Result<String> {
     let path = format!("/proc/{pid}/cgroup");
     let content = fs::read_to_string(&path)?;
@@ -224,11 +249,7 @@ fn read_cgroup_v2_path(pid: u32) -> anyhow::Result<String> {
         // cgroup v2 line format: "0::/some/path"
         if let Some(rest) = line.strip_prefix("0::") {
             let trimmed = rest.trim();
-            if trimmed.is_empty() || trimmed == "/" {
-                return Err(anyhow::anyhow!(
-                    "container is attached to the root cgroup, refusing to seed all host processes"
-                ));
-            }
+            ensure_non_root_cgroup_path(trimmed, "container")?;
             return Ok(trimmed.to_string());
         }
     }
@@ -257,6 +278,146 @@ fn read_cgroup_procs(path: &str) -> anyhow::Result<Vec<u32>> {
     }
 
     Ok(pids)
+}
+
+#[derive(Debug)]
+struct SystemdUnitStatus {
+    active_state: String,
+    sub_state: String,
+    main_pid: Option<u32>,
+}
+
+impl SystemdUnitStatus {
+    fn is_running(&self) -> bool {
+        matches!(self.active_state.as_str(), "active" | "reloading")
+    }
+}
+
+enum SystemdUnitLookupError {
+    NotFound,
+    Other(anyhow::Error),
+}
+
+const SYSTEMD_ERROR_NO_SUCH_UNIT: &str = "org.freedesktop.systemd1.NoSuchUnit";
+const DBUS_ERROR_UNKNOWN_INTERFACE: &str = "org.freedesktop.DBus.Error.UnknownInterface";
+const DBUS_ERROR_UNKNOWN_PROPERTY: &str = "org.freedesktop.DBus.Error.UnknownProperty";
+
+fn is_zbus_method_error(err: &ZbusError, expected: &str) -> bool {
+    matches!(err, ZbusError::MethodError(name, _, _) if **name == expected)
+}
+
+async fn query_systemd_unit_status(
+    conn: &zbus::Connection,
+    unit_name: &str,
+) -> Result<SystemdUnitStatus, SystemdUnitLookupError> {
+    let manager = ManagerProxy::new(conn)
+        .await
+        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?;
+
+    let unit_path = manager
+        .load_unit(unit_name.to_string())
+        .await
+        .map_err(|err| {
+            if is_zbus_method_error(&err, SYSTEMD_ERROR_NO_SUCH_UNIT) {
+                SystemdUnitLookupError::NotFound
+            } else {
+                SystemdUnitLookupError::Other(err.into())
+            }
+        })?;
+
+    let unit_proxy = UnitProxy::builder(conn)
+        .path(unit_path.clone())
+        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?
+        .build()
+        .await
+        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?;
+
+    let service_proxy = ServiceProxy::builder(conn)
+        .path(unit_path)
+        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?
+        .build()
+        .await
+        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?;
+
+    let active_state = unit_proxy
+        .active_state()
+        .await
+        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?;
+    let sub_state = unit_proxy
+        .sub_state()
+        .await
+        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?;
+
+    let main_pid = match service_proxy.main_pid().await {
+        Ok(0) => None,
+        Ok(pid) => Some(pid),
+        Err(err)
+            if is_zbus_method_error(&err, DBUS_ERROR_UNKNOWN_INTERFACE)
+                || is_zbus_method_error(&err, DBUS_ERROR_UNKNOWN_PROPERTY) =>
+        {
+            None
+        }
+        Err(err) => return Err(SystemdUnitLookupError::Other(err.into())),
+    };
+
+    Ok(SystemdUnitStatus {
+        active_state,
+        sub_state,
+        main_pid,
+    })
+}
+
+async fn systemd_unit_pids(conn: &zbus::Connection, unit_name: &str) -> anyhow::Result<Vec<u32>> {
+    let manager = ManagerProxy::new(conn).await?;
+    let entries = manager.get_unit_processes(unit_name.to_string()).await?;
+    let mut pids = Vec::new();
+    let mut seen = HashSet::new();
+    for (_, pid, _) in entries {
+        if pid > 0 && seen.insert(pid) {
+            pids.push(pid);
+        }
+    }
+    Ok(pids)
+}
+
+async fn wait_systemd_unit_running(
+    conn: &zbus::Connection,
+    unit_name: &str,
+) -> anyhow::Result<SystemdUnitStatus> {
+    let mut last_notice = String::new();
+    loop {
+        match query_systemd_unit_status(conn, unit_name).await {
+            Ok(status) => {
+                if status.is_running() {
+                    return Ok(status);
+                }
+
+                let notice = format!(
+                    "Waiting for systemd unit {unit_name} to start (state={} substate={})...",
+                    status.active_state, status.sub_state
+                );
+                if notice != last_notice {
+                    println!("{notice}");
+                    last_notice = notice;
+                }
+            }
+            Err(SystemdUnitLookupError::NotFound) => {
+                let notice = format!("Waiting for systemd unit {unit_name} to exist...");
+                if notice != last_notice {
+                    println!("{notice}");
+                    last_notice = notice;
+                }
+            }
+            Err(SystemdUnitLookupError::Other(err)) => return Err(err),
+        }
+
+        select! {
+            _ = sleep(Duration::from_secs(1)) => {}
+            _ = signal::ctrl_c() => return Err(anyhow::anyhow!(
+                "Interrupted while waiting for systemd unit {unit_name} state to change."
+            )),
+        }
+    }
 }
 
 async fn wait_container_running(
@@ -366,6 +527,8 @@ async fn main() -> anyhow::Result<()> {
         tty: tty_inputs,
         container,
         all_container_processes,
+        systemd_unit,
+        all_systemd_processes,
         no_watch_children,
     } = CliArgs::parse();
 
@@ -432,12 +595,12 @@ async fn main() -> anyhow::Result<()> {
             0
         };
 
-    // Seed PROC_STATE for explicit PID/TTY inputs first (container seeds are merged later).
+    // Seed PROC_STATE for explicit PID/TTY inputs first (container/systemd seeds are merged later).
     let mut watched_roots = Vec::new();
     if !pids.is_empty() || !tty_filters.is_empty() {
         watched_roots =
             seed_proc_state_from_task_iter(&mut ebpf, &pids, &tty_filters, watch_flags)?;
-        if watched_roots.is_empty() && container.is_none() {
+        if watched_roots.is_empty() && container.is_none() && systemd_unit.is_none() {
             watched_roots =
                 wait_pid_or_tty_targets(&mut ebpf, &pids, &tty_filters, &tty_inputs, watch_flags)
                     .await?;
@@ -498,6 +661,81 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Resolve systemd unit (wait for start if needed) and seed PROC_STATE based on mode.
+    let mut systemd_pid = None;
+    let mut systemd_watch_flags = None;
+    let mut systemd_display = None;
+    if let Some(unit_name) = systemd_unit.as_deref() {
+        let system_conn = zbus::Connection::system()
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to connect to system bus: {err}"))?;
+        let status = wait_systemd_unit_running(&system_conn, unit_name).await?;
+
+        let unit_watch_children = if all_systemd_processes {
+            true
+        } else {
+            watch_children
+        };
+        let unit_flags = PROC_FLAG_WATCH_SELF
+            | if unit_watch_children {
+                PROC_FLAG_WATCH_CHILDREN
+            } else {
+                0
+            };
+
+        if let Some(main_pid) = status.main_pid {
+            systemd_pid = Some(main_pid);
+            systemd_watch_flags = Some(unit_flags);
+            systemd_display = Some(format!("systemd-unit={unit_name} pid={main_pid}"));
+        } else {
+            systemd_display = Some(format!("systemd-unit={unit_name}"));
+        }
+
+        if all_systemd_processes {
+            match systemd_unit_pids(&system_conn, unit_name).await {
+                Ok(pids) => seed_proc_state_direct(&mut ebpf, &pids, unit_flags)?,
+                Err(err) => {
+                    let main_pid = status.main_pid.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Failed to get all processes for systemd unit {}: {}. No MainPID is available for fallback.",
+                            unit_name, err
+                        )
+                    })?;
+                    eprintln!(
+                        "Failed to get all processes for systemd unit {}: {}. Falling back to task iterator seed.",
+                        unit_name, err
+                    );
+                    let empty_tty_filters = HashSet::new();
+                    let _ = seed_proc_state_from_task_iter(
+                        &mut ebpf,
+                        &[main_pid],
+                        &empty_tty_filters,
+                        unit_flags,
+                    )?;
+                }
+            }
+        } else {
+            let main_pid = status.main_pid.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "systemd unit {} has no MainPID while active. \
+                     Use --all-systemd-processes for units without MainPID.",
+                    unit_name
+                )
+            })?;
+            if unit_watch_children {
+                let empty_tty_filters = HashSet::new();
+                let _ = seed_proc_state_from_task_iter(
+                    &mut ebpf,
+                    &[main_pid],
+                    &empty_tty_filters,
+                    unit_flags,
+                )?;
+            } else {
+                seed_proc_state_direct(&mut ebpf, &[main_pid], unit_flags)?;
+            }
+        }
+    }
+
     {
         let map = ebpf
             .map_mut(WATCH_PIDS_MAP)
@@ -507,6 +745,9 @@ async fn main() -> anyhow::Result<()> {
             watch_pids.insert(*pid, watch_flags, 0)?;
         }
         if let (Some(pid), Some(flags)) = (container_pid, container_watch_flags) {
+            watch_pids.insert(pid, flags, 0)?;
+        }
+        if let (Some(pid), Some(flags)) = (systemd_pid, systemd_watch_flags) {
             watch_pids.insert(pid, flags, 0)?;
         }
     }
@@ -523,8 +764,14 @@ async fn main() -> anyhow::Result<()> {
         "watch_children=off"
     };
 
-    let container_suffix = if let Some(display) = container_display.as_deref() {
+    let target_suffix = if let Some(display) = container_display.as_deref() {
         if all_container_processes {
+            format!(" {display} seed=all-procs")
+        } else {
+            format!(" {display}")
+        }
+    } else if let Some(display) = systemd_display.as_deref() {
+        if all_systemd_processes {
             format!(" {display} seed=all-procs")
         } else {
             format!(" {display}")
@@ -538,23 +785,23 @@ async fn main() -> anyhow::Result<()> {
         if has_roots {
             println!(
                 "Watching execve syscalls for PIDs: {:?} ({}){} (Ctrl-C to exit)",
-                &watched_roots, child_status, container_suffix
+                &watched_roots, child_status, target_suffix
             );
         } else {
             println!(
                 "Watching execve syscalls ({}){} (Ctrl-C to exit)",
-                child_status, container_suffix
+                child_status, target_suffix
             );
         }
     } else if has_roots {
         println!(
             "Watching execve syscalls for PIDs: {:?} (TTY filters: {:?}) ({}){} (Ctrl-C to exit)",
-            &watched_roots, &tty_inputs, child_status, container_suffix
+            &watched_roots, &tty_inputs, child_status, target_suffix
         );
     } else {
         println!(
             "Watching execve syscalls (TTY filters: {:?}) ({}){} (Ctrl-C to exit)",
-            &tty_inputs, child_status, container_suffix
+            &tty_inputs, child_status, target_suffix
         );
     }
 
