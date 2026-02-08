@@ -107,12 +107,18 @@ fn seed_proc_state_from_task_iter(
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)?;
 
+    let pid_roots_set: HashSet<u32> = pid_roots.iter().copied().collect();
+    // Determine which root PIDs to seed based on PID and TTY filters.
+    let mut root_flags = StdHashMap::new();
     // Build parent->children map.
     let mut children: StdHashMap<u32, Vec<u32>> = StdHashMap::new();
     // Build pid->tty map.
     let mut pid_tty: StdHashMap<u32, String> = StdHashMap::new();
     for chunk in buf.chunks_exact(mem::size_of::<TaskRel>()) {
         let rel: TaskRel = unsafe { ptr::read_unaligned(chunk.as_ptr() as *const TaskRel) };
+        if pid_roots_set.contains(&rel.pid) {
+            root_flags.entry(rel.pid).or_insert(watch_flags);
+        }
         children.entry(rel.ppid).or_default().push(rel.pid);
         let tty_name = cstr_from_u8(&rel.tty_name);
         if !tty_name.is_empty() {
@@ -127,12 +133,6 @@ fn seed_proc_state_from_task_iter(
         ebpf.map_mut(PROC_STATE_MAP)
             .ok_or_else(|| anyhow::anyhow!("map not found"))?,
     )?;
-
-    // Determine which root PIDs to seed based on PID and TTY filters.
-    let mut root_flags = StdHashMap::new();
-    for &pid in pid_roots {
-        root_flags.insert(pid, watch_flags);
-    }
 
     if !tty_filters.is_empty() {
         for (pid, tty_name) in pid_tty {
