@@ -574,6 +574,26 @@ fn build_watch_pids_and_ring(
     Ok((watch_pids, async_ring))
 }
 
+async fn run_plain_event_loop(async_ring: &mut AsyncFd<RingBuf<MapData>>) -> anyhow::Result<()> {
+    loop {
+        select! {
+            res = async_ring.readable_mut() => {
+                let mut guard = res?;
+                let ring = guard.get_inner_mut();
+                drain_exec_events(ring);
+                guard.clear_ready();
+            }
+
+            _ = signal::ctrl_c() => {
+                println!("Exiting...");
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Wait for the specified systemd unit to be active and return its status.
 /// If the unit does not exist or is not active yet, this function will poll until it is.
 /// The unit is considered active if its ActiveState is "active" or "reloading".
@@ -869,9 +889,7 @@ async fn monitor_systemd_runtime(
 
         loop {
             let Some(changed) = main_pid_changes.next().await else {
-                if current_pid.is_some() {
-                    let _ = tx.send(RuntimeUpdate::SystemdPid { index, pid: None });
-                }
+                let _ = tx.send(RuntimeUpdate::SystemdPid { index, pid: None });
                 break;
             };
 
@@ -1097,18 +1115,16 @@ async fn main() -> anyhow::Result<()> {
                         SystemdUnitLookupError::Other(err) => err,
                     })?;
 
-                    if let Some(main_pid) = status.main_pid {
-                        seed_systemd_unit_processes(
-                            &mut ebpf,
-                            &conn,
-                            unit_name,
-                            Some(main_pid),
-                            unit_flags,
-                            unit_watch_children,
-                            all_systemd_processes,
-                        )
-                        .await?;
-                    }
+                    seed_systemd_unit_processes(
+                        &mut ebpf,
+                        &conn,
+                        unit_name,
+                        status.main_pid,
+                        unit_flags,
+                        unit_watch_children,
+                        all_systemd_processes,
+                    )
+                    .await?;
 
                     status.main_pid
                 }
@@ -1237,6 +1253,11 @@ async fn main() -> anyhow::Result<()> {
     }
     drop(update_tx);
 
+    if monitor_handles.is_empty() {
+        run_plain_event_loop(&mut async_ring).await?;
+        return Ok(());
+    }
+
     loop {
         select! {
             res = async_ring.readable_mut() => {
@@ -1264,7 +1285,7 @@ async fn main() -> anyhow::Result<()> {
                     Some(RuntimeUpdate::MonitorError { label, error }) => {
                         return Err(anyhow::anyhow!("{label}: {error}"));
                     }
-                    None => {}
+                    None => break,
                 }
             }
 
