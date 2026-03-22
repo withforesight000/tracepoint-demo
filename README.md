@@ -69,14 +69,15 @@ restart or PID change. Container seeding follows these rules:
   the container seed.
 
 If a systemd unit exists but is not active, the tool waits until it becomes active before
-proceeding. Each systemd unit is tracked independently, and its `MainPID` is refreshed when systemd
-reports a change. Systemd seeding follows these rules:
+proceeding. Each systemd unit is tracked independently, and its running state plus `MainPID` are
+refreshed when systemd reports a change. Systemd seeding follows these rules:
 
 - `--no-watch-children`: watch only the unit's `MainPID`.
 - Default (`--no-watch-children` absent): seed `MainPID` plus descendants using `iter_tasks`.
 - `--all-systemd-processes`: seed every PID currently in the unit via systemd D-Bus
   (`GetUnitProcesses`), then rely on `sched_process_fork` to follow new processes. This overrides
-  `--no-watch-children` for the unit seed.
+  `--no-watch-children` for the unit seed, and units that do not expose `MainPID` are still seeded
+  when they become active.
 
 ```bash
 sudo cargo run --release -- --pid 1234 --pid 9012
@@ -111,8 +112,8 @@ When `--systemd-unit` is used, each unit is resolved via systemd's D-Bus API. If
 active yet, startup waits until it is active. The unit's `MainPID` is merged into `WATCH_PIDS` when
 available, and `PROC_STATE` is seeded either by `iter_tasks` (MainPID + descendants) or via
 `GetUnitProcesses` when `--all-systemd-processes` is set (falling back to `iter_tasks` if the D-Bus
-lookup fails and `MainPID` is available). If systemd reports a new `MainPID`, the watched PID is
-updated.
+lookup fails and `MainPID` is available). Runtime monitoring tracks both `MainPID` and the active
+state, so units that become active after startup are picked up as well.
 
 The `tracepoint_demo` handler caches the watch flags in `PROC_STATE`, copies filename/argv0 strings
 through per-CPU buffers, and reserves an `ExecEvent` slot on the `EXEC_EVENTS` ring buffer. The

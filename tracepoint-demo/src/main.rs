@@ -353,12 +353,23 @@ struct SystemdRuntime {
     all_processes: bool,
     flags: u32,
     current_pid: Option<u32>,
+    current_running: bool,
 }
 
 enum RuntimeUpdate {
-    ContainerPid { index: usize, pid: Option<u32> },
-    SystemdPid { index: usize, pid: Option<u32> },
-    MonitorError { label: String, error: String },
+    ContainerPid {
+        index: usize,
+        pid: Option<u32>,
+    },
+    SystemdStatus {
+        index: usize,
+        pid: Option<u32>,
+        running: bool,
+    },
+    MonitorError {
+        label: String,
+        error: String,
+    },
 }
 
 const SYSTEMD_ERROR_NO_SUCH_UNIT: &str = "org.freedesktop.systemd1.NoSuchUnit";
@@ -773,17 +784,18 @@ async fn apply_systemd_runtime_update(
     ebpf: &mut Ebpf,
     runtime: &mut SystemdRuntime,
     next_pid: Option<u32>,
+    running: bool,
 ) -> anyhow::Result<()> {
-    if runtime.current_pid == next_pid {
+    if runtime.current_pid == next_pid && runtime.current_running == running {
         return Ok(());
     }
 
-    if let Some(pid) = next_pid {
+    if running && (runtime.all_processes || next_pid.is_some()) {
         seed_systemd_unit_processes(
             ebpf,
             &runtime.conn,
             &runtime.unit_name,
-            Some(pid),
+            next_pid,
             runtime.flags,
             runtime.watch_children,
             runtime.all_processes,
@@ -792,6 +804,7 @@ async fn apply_systemd_runtime_update(
     }
 
     runtime.current_pid = next_pid;
+    runtime.current_running = running;
     Ok(())
 }
 
@@ -855,9 +868,11 @@ async fn monitor_systemd_runtime(
     loop {
         let (resolved_unit, status) = wait_systemd_unit_running(&conn, &unit_name).await?;
         let mut current_pid = status.main_pid;
-        let _ = tx.send(RuntimeUpdate::SystemdPid {
+        let mut current_running = status.is_running();
+        let _ = tx.send(RuntimeUpdate::SystemdStatus {
             index,
             pid: current_pid,
+            running: current_running,
         });
 
         let properties_proxy = PropertiesProxy::builder(&conn)
@@ -879,28 +894,37 @@ async fn monitor_systemd_runtime(
 
         loop {
             let Some(changed) = main_pid_changes.next().await else {
-                let _ = tx.send(RuntimeUpdate::SystemdPid { index, pid: None });
+                let _ = tx.send(RuntimeUpdate::SystemdStatus {
+                    index,
+                    pid: None,
+                    running: false,
+                });
                 break;
             };
 
-            let args = changed.args().map_err(|err| {
+            let _ = changed.args().map_err(|err| {
                 anyhow::anyhow!("failed to decode systemd properties change: {err}")
             })?;
 
-            let Some(changed_value) = args.changed_properties().get("MainPID") else {
-                continue;
-            };
+            let status =
+                query_systemd_unit_status(&resolved_unit.unit_proxy, &resolved_unit.service_proxy)
+                    .await
+                    .map_err(|err| match err {
+                        SystemdUnitLookupError::NotFound => {
+                            anyhow::anyhow!("systemd unit {unit_name} disappeared while monitoring")
+                        }
+                        SystemdUnitLookupError::Other(err) => err,
+                    })?;
+            let next_pid = status.main_pid;
+            let next_running = status.is_running();
 
-            let new_pid =
-                <&zbus::zvariant::Value<'_> as std::convert::TryInto<u32>>::try_into(changed_value)
-                    .map_err(|err| anyhow::anyhow!("failed to parse systemd MainPID: {err}"))?;
-            let next_pid = if new_pid == 0 { None } else { Some(new_pid) };
-
-            if next_pid != current_pid {
+            if next_pid != current_pid || next_running != current_running {
                 current_pid = next_pid;
-                let _ = tx.send(RuntimeUpdate::SystemdPid {
+                current_running = next_running;
+                let _ = tx.send(RuntimeUpdate::SystemdStatus {
                     index,
                     pid: next_pid,
+                    running: next_running,
                 });
             }
         }
@@ -1095,36 +1119,47 @@ async fn main() -> anyhow::Result<()> {
                     0
                 };
 
-            let current_pid = match resolve_systemd_unit(&conn, &manager, unit_name).await {
-                Ok(resolved_unit) => {
-                    let status = query_systemd_unit_status(
-                        &resolved_unit.unit_proxy,
-                        &resolved_unit.service_proxy,
-                    )
-                    .await
-                    .map_err(|err| match err {
-                        SystemdUnitLookupError::NotFound => {
-                            anyhow::anyhow!("systemd unit {unit_name} disappeared during startup")
-                        }
-                        SystemdUnitLookupError::Other(err) => err,
-                    })?;
+            let (current_pid, current_running) =
+                match resolve_systemd_unit(&conn, &manager, unit_name).await {
+                    Ok(resolved_unit) => {
+                        let status = query_systemd_unit_status(
+                            &resolved_unit.unit_proxy,
+                            &resolved_unit.service_proxy,
+                        )
+                        .await
+                        .map_err(|err| match err {
+                            SystemdUnitLookupError::NotFound => {
+                                anyhow::anyhow!(
+                                    "systemd unit {unit_name} disappeared during startup"
+                                )
+                            }
+                            SystemdUnitLookupError::Other(err) => err,
+                        })?;
 
-                    seed_systemd_unit_processes(
-                        &mut ebpf,
-                        &conn,
-                        unit_name,
-                        status.main_pid,
-                        unit_flags,
-                        unit_watch_children,
-                        all_systemd_processes,
-                    )
-                    .await?;
+                        let status = if status.is_running() {
+                            status
+                        } else {
+                            let (_, status) = wait_systemd_unit_running(&conn, unit_name).await?;
+                            status
+                        };
 
-                    status.main_pid
-                }
-                Err(SystemdUnitLookupError::NotFound) => None,
-                Err(SystemdUnitLookupError::Other(err)) => return Err(err.into()),
-            };
+                        let current_running = status.is_running();
+                        seed_systemd_unit_processes(
+                            &mut ebpf,
+                            &conn,
+                            unit_name,
+                            status.main_pid,
+                            unit_flags,
+                            unit_watch_children,
+                            all_systemd_processes,
+                        )
+                        .await?;
+
+                        (status.main_pid, current_running)
+                    }
+                    Err(SystemdUnitLookupError::NotFound) => (None, false),
+                    Err(SystemdUnitLookupError::Other(err)) => return Err(err.into()),
+                };
 
             systemd_runtimes.push(SystemdRuntime {
                 conn: conn.clone(),
@@ -1133,6 +1168,7 @@ async fn main() -> anyhow::Result<()> {
                 all_processes: all_systemd_processes,
                 flags: unit_flags,
                 current_pid,
+                current_running,
             });
         }
     }
@@ -1267,11 +1303,11 @@ async fn main() -> anyhow::Result<()> {
                         );
                         sync_watch_pids(&mut watch_pids, &mut current_watch_roots, &desired_roots)?;
                     }
-                    Some(RuntimeUpdate::SystemdPid { index, pid }) => {
+                    Some(RuntimeUpdate::SystemdStatus { index, pid, running }) => {
                         let runtime = systemd_runtimes.get_mut(index).ok_or_else(|| {
                             anyhow::anyhow!("systemd runtime index {index} out of range")
                         })?;
-                        apply_systemd_runtime_update(&mut ebpf, runtime, pid).await?;
+                        apply_systemd_runtime_update(&mut ebpf, runtime, pid, running).await?;
                         let desired_roots = collect_watch_roots(
                             &static_watch_roots,
                             &container_runtimes,
