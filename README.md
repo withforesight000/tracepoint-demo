@@ -40,12 +40,15 @@ The resulting binary contains the pre-built BPF object and is ready to load the 
 
 ## Running
 
-Choose exactly one target kind: PID(s), TTY filter(s), a Docker container, or a systemd unit.
+Choose a target set:
+
+- PID(s) and TTY filter(s) are standalone modes and cannot be combined with container/systemd targets.
+- Docker containers and systemd units can be specified multiple times and combined with each other.
 
 - PID(s): use repeated `--pid` flags or positional PID arguments.
 - TTY filter(s): use repeated `--tty` values to select processes by controlling terminal.
-- Container: use `--container <name-or-id>`.
-- systemd unit: use `--systemd-unit <unit-name>`.
+- Container(s): use repeated `--container <name-or-id>` values.
+- systemd unit(s): use repeated `--systemd-unit <unit-name>` values.
 
 By default each root PID is watched along with any descendants discovered either during seeding or
 via the `sched_process_fork` tracepoint. Use `--no-watch-children` to restrict tracing to the given
@@ -55,7 +58,8 @@ When PID/TTY-based startup finds no matching roots, the tool waits and retries u
 appears (or until interrupted with Ctrl-C).
 
 If a container exists but is not running, the tool waits for a start event before proceeding.
-Container seeding follows these rules:
+Each container is tracked independently, and its main PID is refreshed when Docker reports a
+restart or PID change. Container seeding follows these rules:
 
 - `--no-watch-children`: watch only the container's main PID.
 - Default (`--no-watch-children` absent): seed the main PID plus descendants using `iter_tasks`.
@@ -64,7 +68,8 @@ Container seeding follows these rules:
   the container seed.
 
 If a systemd unit exists but is not active, the tool waits until it becomes active before
-proceeding. Systemd seeding follows these rules:
+proceeding. Each systemd unit is tracked independently, and its `MainPID` is refreshed when systemd
+reports a change. Systemd seeding follows these rules:
 
 - `--no-watch-children`: watch only the unit's `MainPID`.
 - Default (`--no-watch-children` absent): seed `MainPID` plus descendants using `iter_tasks`.
@@ -76,11 +81,9 @@ proceeding. Systemd seeding follows these rules:
 sudo cargo run --release -- --pid 1234 --pid 9012
 sudo cargo run --release -- 1234 9012 --no-watch-children
 sudo cargo run --release -- --tty /dev/pts/9
-sudo cargo run --release -- --tty pts9 --tty /dev/tty1
-sudo cargo run --release -- --container my-service
-sudo cargo run --release -- --container my-service --all-container-processes
-sudo cargo run --release -- --systemd-unit sshd.service
-sudo cargo run --release -- --systemd-unit sshd.service --all-systemd-processes
+sudo cargo run --release -- --container my-service --container sidecar
+sudo cargo run --release -- --container my-service --systemd-unit sshd.service
+sudo cargo run --release -- --systemd-unit sshd.service --systemd-unit user@1000.service --all-systemd-processes
 ```
 
 Each line of output looks like:
@@ -95,17 +98,20 @@ with flags=`PROC_FLAG_WATCH_SELF` (plus `PROC_FLAG_WATCH_CHILDREN` unless `--no-
 used). When `--tty` is used, this startup snapshot is also used to discover root PIDs that own the
 specified TTY. The filter accepts `/dev/`-prefixed values and normalizes PTY names (e.g.
 `/dev/pts/9` and `pts9` are treated as the same terminal). If PID/TTY inputs resolve to no roots at
-startup, the program waits and retries until matching tasks appear (or until interrupted).
+startup, the program waits and retries until matching tasks appear (or until interrupted). Any
+PID/TTY roots are merged with container and systemd roots before tracing starts.
 
-When `--container` is used, the container's main PID is added to `WATCH_PIDS`, and `PROC_STATE` is
-seeded either by `iter_tasks` (main PID + descendants) or by reading `cgroup.procs` when
+When `--container` is used, each container's main PID is merged into `WATCH_PIDS`, and `PROC_STATE`
+is seeded either by `iter_tasks` (main PID + descendants) or by reading `cgroup.procs` when
 `--all-container-processes` is set (falling back to `iter_tasks` if the cgroup lookup fails).
+If Docker reports that a container was restarted, the watched PID is updated to the new main PID.
 
-When `--systemd-unit` is used, the unit is resolved via systemd's D-Bus API. If the unit is not
-active yet, startup waits until it is active. The unit's `MainPID` is added to `WATCH_PIDS` when
+When `--systemd-unit` is used, each unit is resolved via systemd's D-Bus API. If the unit is not
+active yet, startup waits until it is active. The unit's `MainPID` is merged into `WATCH_PIDS` when
 available, and `PROC_STATE` is seeded either by `iter_tasks` (MainPID + descendants) or via
 `GetUnitProcesses` when `--all-systemd-processes` is set (falling back to `iter_tasks` if the D-Bus
-lookup fails and `MainPID` is available).
+lookup fails and `MainPID` is available). If systemd reports a new `MainPID`, the watched PID is
+updated.
 
 The `tracepoint_demo` handler caches the watch flags in `PROC_STATE`, copies filename/argv0 strings
 through per-CPU buffers, and reserves an `ExecEvent` slot on the `EXEC_EVENTS` ring buffer. The

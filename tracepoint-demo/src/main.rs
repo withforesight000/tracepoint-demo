@@ -509,60 +509,69 @@ async fn seed_systemd_unit_processes(
     Ok(())
 }
 
-fn update_systemd_watch_pid(
-    watch_pids: &mut UserHashMap<MapData, u32, u32>,
-    current_pid: &mut Option<u32>,
-    next_pid: Option<u32>,
-    unit_flags: u32,
-) -> anyhow::Result<()> {
-    if *current_pid == next_pid {
-        return Ok(());
-    }
-
-    if let Some(old_pid) = current_pid.take() {
-        watch_pids.remove(&old_pid)?;
-    }
-
-    if let Some(new_pid) = next_pid {
-        watch_pids.insert(new_pid, unit_flags, 0)?;
-        *current_pid = Some(new_pid);
-    }
-
-    Ok(())
+fn add_watch_root(watch_roots: &mut StdHashMap<u32, u32>, pid: u32, flags: u32) {
+    watch_roots
+        .entry(pid)
+        .and_modify(|existing| *existing |= flags)
+        .or_insert(flags);
 }
 
-fn update_container_watch_pid(
+fn collect_watch_roots(
+    static_roots: &StdHashMap<u32, u32>,
+    container_runtimes: &[ContainerRuntime],
+    systemd_runtimes: &[SystemdRuntime],
+) -> StdHashMap<u32, u32> {
+    let mut roots = static_roots.clone();
+
+    for runtime in container_runtimes {
+        if let Some(pid) = runtime.current_pid {
+            add_watch_root(&mut roots, pid, runtime.flags);
+        }
+    }
+
+    for runtime in systemd_runtimes {
+        if let Some(pid) = runtime.current_pid {
+            add_watch_root(&mut roots, pid, runtime.flags);
+        }
+    }
+
+    roots
+}
+
+fn sync_watch_pids(
     watch_pids: &mut UserHashMap<MapData, u32, u32>,
-    current_pid: &mut Option<u32>,
-    next_pid: Option<u32>,
-    container_flags: u32,
+    current_roots: &mut StdHashMap<u32, u32>,
+    desired_roots: &StdHashMap<u32, u32>,
 ) -> anyhow::Result<()> {
-    if *current_pid == next_pid {
-        return Ok(());
+    let removals: Vec<u32> = current_roots
+        .keys()
+        .filter(|pid| !desired_roots.contains_key(pid))
+        .copied()
+        .collect();
+    for pid in removals {
+        watch_pids.remove(&pid)?;
     }
 
-    if let Some(old_pid) = current_pid.take() {
-        watch_pids.remove(&old_pid)?;
+    for (&pid, &flags) in desired_roots {
+        if current_roots.get(&pid).copied() != Some(flags) {
+            watch_pids.insert(pid, flags, 0)?;
+        }
     }
 
-    if let Some(new_pid) = next_pid {
-        watch_pids.insert(new_pid, container_flags, 0)?;
-        *current_pid = Some(new_pid);
-    }
-
+    *current_roots = desired_roots.clone();
     Ok(())
 }
 
 fn build_watch_pids_and_ring(
     ebpf: &mut Ebpf,
-    watched_roots: &[(u32, u32)],
+    watched_roots: &StdHashMap<u32, u32>,
 ) -> anyhow::Result<(UserHashMap<MapData, u32, u32>, AsyncFd<RingBuf<MapData>>)> {
     let map = ebpf
         .take_map(WATCH_PIDS_MAP)
         .ok_or_else(|| anyhow::anyhow!("map not found"))?;
     let mut watch_pids: UserHashMap<_, u32, u32> = UserHashMap::try_from(map)?;
-    for (pid, flags) in watched_roots {
-        watch_pids.insert(*pid, *flags, 0)?;
+    for (&pid, &flags) in watched_roots {
+        watch_pids.insert(pid, flags, 0)?;
     }
 
     let ring_map = ebpf
@@ -736,16 +745,11 @@ async fn seed_container_processes(
 
 async fn apply_container_runtime_update(
     ebpf: &mut Ebpf,
-    watch_pids: &mut UserHashMap<MapData, u32, u32>,
     runtime: &mut ContainerRuntime,
     next_pid: Option<u32>,
 ) -> anyhow::Result<()> {
     if runtime.current_pid == next_pid {
         return Ok(());
-    }
-
-    if let Some(old_pid) = runtime.current_pid.take() {
-        watch_pids.remove(&old_pid)?;
     }
 
     if let Some(pid) = next_pid {
@@ -758,29 +762,19 @@ async fn apply_container_runtime_update(
             runtime.all_processes,
         )
         .await?;
-        update_container_watch_pid(
-            watch_pids,
-            &mut runtime.current_pid,
-            Some(pid),
-            runtime.flags,
-        )?;
     }
 
+    runtime.current_pid = next_pid;
     Ok(())
 }
 
 async fn apply_systemd_runtime_update(
     ebpf: &mut Ebpf,
-    watch_pids: &mut UserHashMap<MapData, u32, u32>,
     runtime: &mut SystemdRuntime,
     next_pid: Option<u32>,
 ) -> anyhow::Result<()> {
     if runtime.current_pid == next_pid {
         return Ok(());
-    }
-
-    if let Some(old_pid) = runtime.current_pid.take() {
-        watch_pids.remove(&old_pid)?;
     }
 
     if let Some(pid) = next_pid {
@@ -794,14 +788,9 @@ async fn apply_systemd_runtime_update(
             runtime.all_processes,
         )
         .await?;
-        update_systemd_watch_pid(
-            watch_pids,
-            &mut runtime.current_pid,
-            Some(pid),
-            runtime.flags,
-        )?;
     }
 
+    runtime.current_pid = next_pid;
     Ok(())
 }
 
@@ -1027,15 +1016,19 @@ async fn main() -> anyhow::Result<()> {
         };
 
     // Seed PROC_STATE for explicit PID/TTY inputs first (container/systemd seeds are merged later).
-    let mut watched_roots: Vec<(u32, u32)> = Vec::new();
+    let mut static_watch_roots: StdHashMap<u32, u32> = StdHashMap::new();
     if !pids.is_empty() || !tty_filters.is_empty() {
         let roots = seed_proc_state_from_task_iter(&mut ebpf, &pids, &tty_filters, watch_flags)?;
-        watched_roots.extend(roots.into_iter().map(|pid| (pid, watch_flags)));
-        if watched_roots.is_empty() && container.is_empty() && systemd_unit.is_empty() {
+        for pid in roots {
+            add_watch_root(&mut static_watch_roots, pid, watch_flags);
+        }
+        if static_watch_roots.is_empty() && container.is_empty() && systemd_unit.is_empty() {
             let roots =
                 wait_pid_or_tty_targets(&mut ebpf, &pids, &tty_filters, &tty_inputs, watch_flags)
                     .await?;
-            watched_roots.extend(roots.into_iter().map(|pid| (pid, watch_flags)));
+            for pid in roots {
+                add_watch_root(&mut static_watch_roots, pid, watch_flags);
+            }
         }
     }
 
@@ -1143,18 +1136,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    for runtime in &container_runtimes {
-        if let Some(pid) = runtime.current_pid {
-            watched_roots.push((pid, runtime.flags));
-        }
-    }
-    for runtime in &systemd_runtimes {
-        if let Some(pid) = runtime.current_pid {
-            watched_roots.push((pid, runtime.flags));
-        }
-    }
-
-    let (mut watch_pids, mut async_ring) = build_watch_pids_and_ring(&mut ebpf, &watched_roots)?;
+    let mut current_watch_roots =
+        collect_watch_roots(&static_watch_roots, &container_runtimes, &systemd_runtimes);
+    let (mut watch_pids, mut async_ring) =
+        build_watch_pids_and_ring(&mut ebpf, &current_watch_roots)?;
 
     let child_status = if watch_children {
         "watch_children=on"
@@ -1193,7 +1178,7 @@ async fn main() -> anyhow::Result<()> {
         format!(" {}", target_descriptions.join(" "))
     };
 
-    let watched_root_pids: Vec<u32> = watched_roots.iter().map(|(pid, _)| *pid).collect();
+    let watched_root_pids: Vec<u32> = current_watch_roots.keys().copied().collect();
     let has_roots = !watched_root_pids.is_empty();
     if tty_inputs.is_empty() {
         if has_roots {
@@ -1273,14 +1258,25 @@ async fn main() -> anyhow::Result<()> {
                         let runtime = container_runtimes.get_mut(index).ok_or_else(|| {
                             anyhow::anyhow!("container runtime index {index} out of range")
                         })?;
-                        apply_container_runtime_update(&mut ebpf, &mut watch_pids, runtime, pid)
-                            .await?;
+                        apply_container_runtime_update(&mut ebpf, runtime, pid).await?;
+                        let desired_roots = collect_watch_roots(
+                            &static_watch_roots,
+                            &container_runtimes,
+                            &systemd_runtimes,
+                        );
+                        sync_watch_pids(&mut watch_pids, &mut current_watch_roots, &desired_roots)?;
                     }
                     Some(RuntimeUpdate::SystemdPid { index, pid }) => {
                         let runtime = systemd_runtimes.get_mut(index).ok_or_else(|| {
                             anyhow::anyhow!("systemd runtime index {index} out of range")
                         })?;
-                        apply_systemd_runtime_update(&mut ebpf, &mut watch_pids, runtime, pid).await?;
+                        apply_systemd_runtime_update(&mut ebpf, runtime, pid).await?;
+                        let desired_roots = collect_watch_roots(
+                            &static_watch_roots,
+                            &container_runtimes,
+                            &systemd_runtimes,
+                        );
+                        sync_watch_pids(&mut watch_pids, &mut current_watch_roots, &desired_roots)?;
                     }
                     Some(RuntimeUpdate::MonitorError { label, error }) => {
                         return Err(anyhow::anyhow!("{label}: {error}"));
