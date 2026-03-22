@@ -20,6 +20,7 @@ use log::debug;
 use tokio::time::{Duration, sleep};
 use tokio::{io::unix::AsyncFd, select, signal};
 use zbus::Error as ZbusError;
+use zbus::zvariant::OwnedObjectPath;
 use zbus_systemd::systemd1::{ManagerProxy, ServiceProxy, UnitProxy};
 
 #[derive(Parser)]
@@ -298,6 +299,12 @@ enum SystemdUnitLookupError {
     Other(anyhow::Error),
 }
 
+struct ResolvedSystemdUnit<'a> {
+    _unit_path: OwnedObjectPath,
+    unit_proxy: UnitProxy<'a>,
+    service_proxy: ServiceProxy<'a>,
+}
+
 const SYSTEMD_ERROR_NO_SUCH_UNIT: &str = "org.freedesktop.systemd1.NoSuchUnit";
 const DBUS_ERROR_UNKNOWN_INTERFACE: &str = "org.freedesktop.DBus.Error.UnknownInterface";
 const DBUS_ERROR_UNKNOWN_PROPERTY: &str = "org.freedesktop.DBus.Error.UnknownProperty";
@@ -306,39 +313,13 @@ fn is_zbus_method_error(err: &ZbusError, expected: &str) -> bool {
     matches!(err, ZbusError::MethodError(name, _, _) if **name == expected)
 }
 
+/// Query the systemd unit status using the provided proxies.
+/// Returns `SystemdUnitLookupError::NotFound` if the unit is not found, which can happen if the unit was removed
+/// after being resolved. Other errors are returned as `SystemdUnitLookupError::Other`.
 async fn query_systemd_unit_status(
-    conn: &zbus::Connection,
-    unit_name: &str,
+    unit_proxy: &UnitProxy<'_>,
+    service_proxy: &ServiceProxy<'_>,
 ) -> Result<SystemdUnitStatus, SystemdUnitLookupError> {
-    let manager = ManagerProxy::new(conn)
-        .await
-        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?;
-
-    let unit_path = manager
-        .load_unit(unit_name.to_string())
-        .await
-        .map_err(|err| {
-            if is_zbus_method_error(&err, SYSTEMD_ERROR_NO_SUCH_UNIT) {
-                SystemdUnitLookupError::NotFound
-            } else {
-                SystemdUnitLookupError::Other(err.into())
-            }
-        })?;
-
-    let unit_proxy = UnitProxy::builder(conn)
-        .path(unit_path.clone())
-        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?
-        .build()
-        .await
-        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?;
-
-    let service_proxy = ServiceProxy::builder(conn)
-        .path(unit_path)
-        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?
-        .build()
-        .await
-        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?;
-
     let active_state = unit_proxy
         .active_state()
         .await
@@ -367,6 +348,46 @@ async fn query_systemd_unit_status(
     })
 }
 
+/// Resolve the systemd unit by name and return proxies for querying its status.
+/// If the unit is not found, returns `SystemdUnitLookupError::NotFound`. Other errors are returned as
+/// `SystemdUnitLookupError::Other`.
+async fn resolve_systemd_unit<'a>(
+    conn: &'a zbus::Connection,
+    manager: &ManagerProxy<'a>,
+    unit_name: &str,
+) -> Result<ResolvedSystemdUnit<'a>, SystemdUnitLookupError> {
+    let unit_path = manager
+        .load_unit(unit_name.to_string())
+        .await
+        .map_err(|err| {
+            if is_zbus_method_error(&err, SYSTEMD_ERROR_NO_SUCH_UNIT) {
+                SystemdUnitLookupError::NotFound
+            } else {
+                SystemdUnitLookupError::Other(err.into())
+            }
+        })?;
+
+    let unit_proxy = UnitProxy::builder(conn)
+        .path(unit_path.clone())
+        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?
+        .build()
+        .await
+        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?;
+
+    let service_proxy = ServiceProxy::builder(conn)
+        .path(unit_path.clone())
+        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?
+        .build()
+        .await
+        .map_err(|err| SystemdUnitLookupError::Other(err.into()))?;
+
+    Ok(ResolvedSystemdUnit {
+        _unit_path: unit_path,
+        unit_proxy,
+        service_proxy,
+    })
+}
+
 async fn systemd_unit_pids(conn: &zbus::Connection, unit_name: &str) -> anyhow::Result<Vec<u32>> {
     let manager = ManagerProxy::new(conn).await?;
     let entries = manager.get_unit_processes(unit_name.to_string()).await?;
@@ -380,35 +401,64 @@ async fn systemd_unit_pids(conn: &zbus::Connection, unit_name: &str) -> anyhow::
     Ok(pids)
 }
 
+/// Wait for the specified systemd unit to be active and return its status.
+/// If the unit does not exist or is not active yet, this function will poll until it is.
+/// The unit is considered active if its ActiveState is "active" or "reloading".
 async fn wait_systemd_unit_running(
     conn: &zbus::Connection,
     unit_name: &str,
 ) -> anyhow::Result<SystemdUnitStatus> {
     let mut last_notice = String::new();
-    loop {
-        match query_systemd_unit_status(conn, unit_name).await {
-            Ok(status) => {
-                if status.is_running() {
-                    return Ok(status);
-                }
+    let manager = ManagerProxy::new(conn)
+        .await
+        .map_err(|err| anyhow::anyhow!("failed to create systemd manager proxy: {err}"))?;
+    let mut resolved_unit: Option<ResolvedSystemdUnit<'_>> = None;
 
-                let notice = format!(
-                    "Waiting for systemd unit {unit_name} to start (state={} substate={})...",
-                    status.active_state, status.sub_state
-                );
-                if notice != last_notice {
-                    println!("{notice}");
-                    last_notice = notice;
+    loop {
+        if resolved_unit.is_none() {
+            match resolve_systemd_unit(conn, &manager, unit_name).await {
+                Ok(unit) => {
+                    resolved_unit = Some(unit);
                 }
-            }
-            Err(SystemdUnitLookupError::NotFound) => {
-                let notice = format!("Waiting for systemd unit {unit_name} to exist...");
-                if notice != last_notice {
-                    println!("{notice}");
-                    last_notice = notice;
+                Err(SystemdUnitLookupError::NotFound) => {
+                    let notice = format!("Waiting for systemd unit {unit_name} to exist...");
+                    if notice != last_notice {
+                        println!("{notice}");
+                        last_notice = notice;
+                    }
                 }
+                Err(SystemdUnitLookupError::Other(err)) => return Err(err),
             }
-            Err(SystemdUnitLookupError::Other(err)) => return Err(err),
+        }
+
+        if let Some(cached_unit) = resolved_unit.as_ref() {
+            match query_systemd_unit_status(&cached_unit.unit_proxy, &cached_unit.service_proxy)
+                .await
+            {
+                Ok(status) => {
+                    if status.is_running() {
+                        return Ok(status);
+                    }
+
+                    let notice = format!(
+                        "Waiting for systemd unit {unit_name} to start (state={} substate={})...",
+                        status.active_state, status.sub_state
+                    );
+                    if notice != last_notice {
+                        println!("{notice}");
+                        last_notice = notice;
+                    }
+                }
+                Err(SystemdUnitLookupError::NotFound) => {
+                    resolved_unit = None;
+                    let notice = format!("Waiting for systemd unit {unit_name} to exist...");
+                    if notice != last_notice {
+                        println!("{notice}");
+                        last_notice = notice;
+                    }
+                }
+                Err(SystemdUnitLookupError::Other(err)) => return Err(err),
+            }
         }
 
         select! {
