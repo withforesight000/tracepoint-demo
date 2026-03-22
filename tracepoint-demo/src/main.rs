@@ -373,7 +373,7 @@ async fn systemd_unit_pids(conn: &zbus::Connection, unit_name: &str) -> anyhow::
     let mut pids = Vec::new();
     let mut seen = HashSet::new();
     for (_, pid, _) in entries {
-        if pid > 0 && seen.insert(pid) {
+        if pid != 0 && seen.insert(pid) {
             pids.push(pid);
         }
     }
