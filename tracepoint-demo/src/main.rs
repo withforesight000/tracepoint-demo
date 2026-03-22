@@ -18,7 +18,7 @@ use clap::{ArgGroup, Parser};
 use futures_util::StreamExt;
 use log::debug;
 use tokio::time::{Duration, sleep};
-use tokio::{io::unix::AsyncFd, select, signal};
+use tokio::{io::unix::AsyncFd, select, signal, sync::mpsc};
 use zbus::Error as ZbusError;
 use zbus::fdo::PropertiesProxy;
 use zbus::zvariant::OwnedObjectPath;
@@ -55,9 +55,9 @@ struct CliArgs {
         short = 'c',
         long = "container",
         value_name = "NAME_OR_ID",
-        conflicts_with_all = ["pid", "positional_pids", "tty", "systemd_unit"]
+        conflicts_with_all = ["pid", "positional_pids", "tty"]
     )]
-    container: Option<String>,
+    container: Vec<String>,
 
     /// Seed all processes currently in the container at startup.
     /// This is useful to processes to start with `docker exec`.
@@ -69,9 +69,9 @@ struct CliArgs {
         short = 'u',
         long = "systemd-unit",
         value_name = "UNIT",
-        conflicts_with_all = ["pid", "positional_pids", "tty", "container"]
+        conflicts_with_all = ["pid", "positional_pids", "tty"]
     )]
-    systemd_unit: Option<String>,
+    systemd_unit: Vec<String>,
 
     /// Seed all processes currently in the systemd unit at startup.
     #[arg(long = "all-systemd-processes", requires = "systemd_unit")]
@@ -341,6 +341,23 @@ struct ContainerRuntime {
     name_or_id: String,
     watch_children: bool,
     all_processes: bool,
+    flags: u32,
+    current_pid: Option<u32>,
+}
+
+struct SystemdRuntime {
+    conn: zbus::Connection,
+    unit_name: String,
+    watch_children: bool,
+    all_processes: bool,
+    flags: u32,
+    current_pid: Option<u32>,
+}
+
+enum RuntimeUpdate {
+    ContainerPid { index: usize, pid: Option<u32> },
+    SystemdPid { index: usize, pid: Option<u32> },
+    MonitorError { label: String, error: String },
 }
 
 const SYSTEMD_ERROR_NO_SUCH_UNIT: &str = "org.freedesktop.systemd1.NoSuchUnit";
@@ -514,27 +531,38 @@ fn update_systemd_watch_pid(
     Ok(())
 }
 
+fn update_container_watch_pid(
+    watch_pids: &mut UserHashMap<MapData, u32, u32>,
+    current_pid: &mut Option<u32>,
+    next_pid: Option<u32>,
+    container_flags: u32,
+) -> anyhow::Result<()> {
+    if *current_pid == next_pid {
+        return Ok(());
+    }
+
+    if let Some(old_pid) = current_pid.take() {
+        watch_pids.remove(&old_pid)?;
+    }
+
+    if let Some(new_pid) = next_pid {
+        watch_pids.insert(new_pid, container_flags, 0)?;
+        *current_pid = Some(new_pid);
+    }
+
+    Ok(())
+}
+
 fn build_watch_pids_and_ring(
     ebpf: &mut Ebpf,
-    watched_roots: &[u32],
-    watch_flags: u32,
-    container_pid: Option<u32>,
-    container_watch_flags: Option<u32>,
-    systemd_pid: Option<u32>,
-    systemd_watch_flags: Option<u32>,
+    watched_roots: &[(u32, u32)],
 ) -> anyhow::Result<(UserHashMap<MapData, u32, u32>, AsyncFd<RingBuf<MapData>>)> {
     let map = ebpf
         .take_map(WATCH_PIDS_MAP)
         .ok_or_else(|| anyhow::anyhow!("map not found"))?;
     let mut watch_pids: UserHashMap<_, u32, u32> = UserHashMap::try_from(map)?;
-    for pid in watched_roots {
-        watch_pids.insert(*pid, watch_flags, 0)?;
-    }
-    if let (Some(pid), Some(flags)) = (container_pid, container_watch_flags) {
-        watch_pids.insert(pid, flags, 0)?;
-    }
-    if let (Some(pid), Some(flags)) = (systemd_pid, systemd_watch_flags) {
-        watch_pids.insert(pid, flags, 0)?;
+    for (pid, flags) in watched_roots {
+        watch_pids.insert(*pid, *flags, 0)?;
     }
 
     let ring_map = ebpf
@@ -544,117 +572,6 @@ fn build_watch_pids_and_ring(
     let async_ring = AsyncFd::new(ring)?;
 
     Ok((watch_pids, async_ring))
-}
-
-async fn run_plain_event_loop(async_ring: &mut AsyncFd<RingBuf<MapData>>) -> anyhow::Result<()> {
-    loop {
-        select! {
-            res = async_ring.readable_mut() => {
-                let mut guard = res?;
-                let ring = guard.get_inner_mut();
-                drain_exec_events(ring);
-                guard.clear_ready();
-            }
-
-            _ = signal::ctrl_c() => {
-                println!("Exiting...");
-                break;
-            }
-        }
-    }
-
-    Ok(())
-}
-
-async fn run_systemd_event_loop<'a>(
-    async_ring: &mut AsyncFd<RingBuf<MapData>>,
-    ebpf: &mut Ebpf,
-    watch_pids: &mut UserHashMap<MapData, u32, u32>,
-    conn: &'a zbus::Connection,
-    unit_path: OwnedObjectPath,
-    unit_name: &'a str,
-    systemd_pid: &mut Option<u32>,
-    unit_flags: u32,
-    all_systemd_processes: bool,
-    watch_children: bool,
-) -> anyhow::Result<()> {
-    let properties_proxy = PropertiesProxy::builder(conn)
-        .destination("org.freedesktop.systemd1")
-        .map_err(|err| anyhow::anyhow!("failed to set systemd destination: {err}"))?
-        .path(unit_path)
-        .map_err(|err| anyhow::anyhow!("failed to set systemd unit path: {err}"))?
-        .build()
-        .await
-        .map_err(|err| anyhow::anyhow!("failed to build systemd properties proxy: {err}"))?;
-    let mut main_pid_changes = properties_proxy
-        .receive_properties_changed()
-        .await
-        .map_err(|err| anyhow::anyhow!("failed to subscribe to systemd property changes: {err}"))?;
-    let _ = main_pid_changes.next().await;
-
-    loop {
-        select! {
-            res = async_ring.readable_mut() => {
-                let mut guard = res?;
-                let ring = guard.get_inner_mut();
-                drain_exec_events(ring);
-                guard.clear_ready();
-            }
-
-            maybe_changed = main_pid_changes.next() => {
-                let changed = maybe_changed.ok_or_else(|| {
-                    anyhow::anyhow!("systemd properties change stream ended unexpectedly")
-                })?;
-                let args = changed.args().map_err(|err| {
-                    anyhow::anyhow!("failed to decode systemd properties change: {err}")
-                })?;
-
-                let Some(changed_value) = args.changed_properties().get("MainPID") else {
-                    continue;
-                };
-
-                let new_pid = <&zbus::zvariant::Value<'_> as std::convert::TryInto<u32>>::try_into(
-                    changed_value,
-                )
-                .map_err(|err| anyhow::anyhow!("failed to parse systemd MainPID: {err}"))?;
-                let next_pid = if new_pid == 0 { None } else { Some(new_pid) };
-
-                if next_pid != *systemd_pid {
-                    if let Some(pid) = next_pid {
-                        let effective_watch_children = if all_systemd_processes {
-                            true
-                        } else {
-                            watch_children
-                        };
-                        seed_systemd_unit_processes(
-                            ebpf,
-                            conn,
-                            unit_name,
-                            Some(pid),
-                            unit_flags,
-                            effective_watch_children,
-                            all_systemd_processes,
-                        )
-                        .await?;
-                    }
-
-                    update_systemd_watch_pid(
-                        watch_pids,
-                        systemd_pid,
-                        next_pid,
-                        unit_flags,
-                    )?;
-                }
-            }
-
-            _ = signal::ctrl_c() => {
-                println!("Exiting...");
-                break;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Wait for the specified systemd unit to be active and return its status.
@@ -729,72 +646,6 @@ async fn wait_systemd_unit_running<'a>(
     }
 }
 
-async fn wait_container_running(
-    docker: &Docker,
-    name_or_id: &str,
-) -> anyhow::Result<(String, u32)> {
-    let mut filters = StdHashMap::new();
-    filters.insert("container".to_string(), vec![name_or_id.to_string()]);
-    filters.insert("type".to_string(), vec!["container".to_string()]);
-
-    let mut events = docker.events(Some(EventsOptions {
-        since: None,
-        until: None,
-        filters: Some(filters),
-    }));
-
-    loop {
-        match docker.inspect_container(name_or_id, None).await {
-            Ok(inspect) => {
-                let id = inspect
-                    .id
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("Container {} has no id.", name_or_id))?;
-
-                if let Some(state) = inspect.state {
-                    if state.running.unwrap_or(false) {
-                        let pid = state.pid.unwrap_or(0);
-                        if pid <= 0 {
-                            return Err(anyhow::anyhow!(
-                                "Container {} returned invalid PID.",
-                                name_or_id
-                            ));
-                        }
-                        return Ok((id, pid as u32));
-                    }
-                }
-
-                println!("Waiting for container {name_or_id} to start...");
-            }
-            Err(err) => match err {
-                BollardError::DockerResponseServerError { status_code, .. }
-                    if status_code == 404 =>
-                {
-                    println!("Waiting for container {name_or_id} to exist...");
-                }
-                _ => {
-                    return Err(err.into());
-                }
-            },
-        }
-
-        select! {
-            maybe_event = events.next() => match maybe_event {
-                Some(Ok(_)) => {
-                    continue;
-                }
-                Some(Err(err)) => return Err(err.into()),
-                None => return Err(anyhow::anyhow!(
-                    "Docker event stream ended while waiting for container {name_or_id} state to change."
-                )),
-            },
-            _ = signal::ctrl_c() => return Err(anyhow::anyhow!(
-                "Interrupted while waiting for container {name_or_id} state to change."
-            )),
-        }
-    }
-}
-
 async fn query_container_main_pid(
     docker: &Docker,
     name_or_id: &str,
@@ -863,41 +714,85 @@ async fn seed_container_processes(
     Ok(())
 }
 
-fn update_container_watch_pid(
+async fn apply_container_runtime_update(
+    ebpf: &mut Ebpf,
     watch_pids: &mut UserHashMap<MapData, u32, u32>,
-    current_pid: &mut Option<u32>,
+    runtime: &mut ContainerRuntime,
     next_pid: Option<u32>,
-    container_flags: u32,
 ) -> anyhow::Result<()> {
-    if *current_pid == next_pid {
+    if runtime.current_pid == next_pid {
         return Ok(());
     }
 
-    if let Some(old_pid) = current_pid.take() {
+    if let Some(old_pid) = runtime.current_pid.take() {
         watch_pids.remove(&old_pid)?;
     }
 
-    if let Some(new_pid) = next_pid {
-        watch_pids.insert(new_pid, container_flags, 0)?;
-        *current_pid = Some(new_pid);
+    if let Some(pid) = next_pid {
+        seed_container_processes(
+            ebpf,
+            &runtime.name_or_id,
+            pid,
+            runtime.flags,
+            runtime.watch_children,
+            runtime.all_processes,
+        )
+        .await?;
+        update_container_watch_pid(
+            watch_pids,
+            &mut runtime.current_pid,
+            Some(pid),
+            runtime.flags,
+        )?;
     }
 
     Ok(())
 }
 
-async fn run_container_event_loop(
-    async_ring: &mut AsyncFd<RingBuf<MapData>>,
+async fn apply_systemd_runtime_update(
     ebpf: &mut Ebpf,
     watch_pids: &mut UserHashMap<MapData, u32, u32>,
-    docker: &Docker,
-    name_or_id: &str,
-    container_pid: &mut Option<u32>,
-    container_flags: u32,
-    container_watch_children: bool,
-    all_container_processes: bool,
+    runtime: &mut SystemdRuntime,
+    next_pid: Option<u32>,
+) -> anyhow::Result<()> {
+    if runtime.current_pid == next_pid {
+        return Ok(());
+    }
+
+    if let Some(old_pid) = runtime.current_pid.take() {
+        watch_pids.remove(&old_pid)?;
+    }
+
+    if let Some(pid) = next_pid {
+        seed_systemd_unit_processes(
+            ebpf,
+            &runtime.conn,
+            &runtime.unit_name,
+            Some(pid),
+            runtime.flags,
+            runtime.watch_children,
+            runtime.all_processes,
+        )
+        .await?;
+        update_systemd_watch_pid(
+            watch_pids,
+            &mut runtime.current_pid,
+            Some(pid),
+            runtime.flags,
+        )?;
+    }
+
+    Ok(())
+}
+
+async fn monitor_container_runtime(
+    docker: Docker,
+    name_or_id: String,
+    tx: mpsc::UnboundedSender<RuntimeUpdate>,
+    index: usize,
 ) -> anyhow::Result<()> {
     let mut filters = StdHashMap::new();
-    filters.insert("container".to_string(), vec![name_or_id.to_string()]);
+    filters.insert("container".to_string(), vec![name_or_id.clone()]);
     filters.insert("type".to_string(), vec!["container".to_string()]);
 
     let mut events = docker.events(Some(EventsOptions {
@@ -906,162 +801,102 @@ async fn run_container_event_loop(
         filters: Some(filters),
     }));
 
-    let mut last_notice = String::new();
+    let mut current_pid = query_container_main_pid(&docker, &name_or_id).await?;
+    let _ = tx.send(RuntimeUpdate::ContainerPid {
+        index,
+        pid: current_pid,
+    });
+
     loop {
-        let waiting_for_start = container_pid.is_none();
-        if waiting_for_start {
-            select! {
-                res = async_ring.readable_mut() => {
-                    let mut guard = res?;
-                    let ring = guard.get_inner_mut();
-                    drain_exec_events(ring);
-                    guard.clear_ready();
+        select! {
+            maybe_event = events.next() => {
+                match maybe_event {
+                    Some(Ok(_)) => {}
+                    Some(Err(err)) => return Err(err.into()),
+                    None => return Err(anyhow::anyhow!(
+                        "Docker event stream ended while monitoring container {name_or_id}."
+                    )),
                 }
 
-                maybe_event = events.next() => {
-                    match maybe_event {
-                        Some(Ok(_)) => {}
-                        Some(Err(err)) => return Err(err.into()),
-                        None => return Err(anyhow::anyhow!(
-                            "Docker event stream ended while waiting for container {name_or_id} to state change."
-                        )),
-                    }
-
-                    match query_container_main_pid(docker, name_or_id).await? {
-                        Some(pid) => {
-                            let unit_seed_children = if all_container_processes {
-                                true
-                            } else {
-                                container_watch_children
-                            };
-                            seed_container_processes(
-                                ebpf,
-                                name_or_id,
-                                pid,
-                                container_flags,
-                                unit_seed_children,
-                                all_container_processes,
-                            )
-                            .await?;
-                            update_container_watch_pid(
-                                watch_pids,
-                                container_pid,
-                                Some(pid),
-                                container_flags,
-                            )?;
-                        }
-                        None => {
-                            let notice = format!("Waiting for container {name_or_id} to start...");
-                            if notice != last_notice {
-                                println!("{notice}");
-                                last_notice = notice;
-                            }
-                        }
-                    }
-                }
-
-                _ = sleep(Duration::from_secs(1)) => {
-                    match query_container_main_pid(docker, name_or_id).await? {
-                        Some(pid) => {
-                            let unit_seed_children = if all_container_processes {
-                                true
-                            } else {
-                                container_watch_children
-                            };
-                            seed_container_processes(
-                                ebpf,
-                                name_or_id,
-                                pid,
-                                container_flags,
-                                unit_seed_children,
-                                all_container_processes,
-                            )
-                            .await?;
-                            update_container_watch_pid(
-                                watch_pids,
-                                container_pid,
-                                Some(pid),
-                                container_flags,
-                            )?;
-                        }
-                        None => {
-                            let notice = format!("Waiting for container {name_or_id} to exist...");
-                            if notice != last_notice {
-                                println!("{notice}");
-                                last_notice = notice;
-                            }
-                        }
-                    }
-                }
-
-                _ = signal::ctrl_c() => {
-                    println!("Exiting...");
-                    break;
+                let next_pid = query_container_main_pid(&docker, &name_or_id).await?;
+                if next_pid != current_pid {
+                    current_pid = next_pid;
+                    let _ = tx.send(RuntimeUpdate::ContainerPid { index, pid: next_pid });
                 }
             }
-        } else {
-            select! {
-                res = async_ring.readable_mut() => {
-                    let mut guard = res?;
-                    let ring = guard.get_inner_mut();
-                    drain_exec_events(ring);
-                    guard.clear_ready();
-                }
 
-                maybe_event = events.next() => {
-                    match maybe_event {
-                        Some(Ok(_)) => {}
-                        Some(Err(err)) => return Err(err.into()),
-                        None => return Err(anyhow::anyhow!(
-                            "Docker event stream ended while watching container {name_or_id}."
-                        )),
-                    }
-
-                    match query_container_main_pid(docker, name_or_id).await? {
-                        Some(pid) => {
-                            if Some(pid) != *container_pid {
-                                let unit_seed_children = if all_container_processes {
-                                    true
-                                } else {
-                                    container_watch_children
-                                };
-                                seed_container_processes(
-                                    ebpf,
-                                    name_or_id,
-                                    pid,
-                                    container_flags,
-                                    unit_seed_children,
-                                    all_container_processes,
-                                )
-                                .await?;
-                                update_container_watch_pid(
-                                    watch_pids,
-                                    container_pid,
-                                    Some(pid),
-                                    container_flags,
-                                )?;
-                            }
-                        }
-                        None => {
-                            let notice = format!("Waiting for container {name_or_id} to start...");
-                            if notice != last_notice {
-                                println!("{notice}");
-                                last_notice = notice;
-                            }
-                            update_container_watch_pid(watch_pids, container_pid, None, container_flags)?;
-                        }
-                    }
-                }
-
-                _ = signal::ctrl_c() => {
-                    println!("Exiting...");
-                    break;
+            _ = sleep(Duration::from_secs(1)) => {
+                let next_pid = query_container_main_pid(&docker, &name_or_id).await?;
+                if next_pid != current_pid {
+                    current_pid = next_pid;
+                    let _ = tx.send(RuntimeUpdate::ContainerPid { index, pid: next_pid });
                 }
             }
         }
     }
+}
 
-    Ok(())
+async fn monitor_systemd_runtime(
+    conn: zbus::Connection,
+    unit_name: String,
+    tx: mpsc::UnboundedSender<RuntimeUpdate>,
+    index: usize,
+) -> anyhow::Result<()> {
+    loop {
+        let (resolved_unit, status) = wait_systemd_unit_running(&conn, &unit_name).await?;
+        let mut current_pid = status.main_pid;
+        let _ = tx.send(RuntimeUpdate::SystemdPid {
+            index,
+            pid: current_pid,
+        });
+
+        let properties_proxy = PropertiesProxy::builder(&conn)
+            .destination("org.freedesktop.systemd1")
+            .map_err(|err| anyhow::anyhow!("failed to set systemd destination: {err}"))?
+            .path(resolved_unit._unit_path.clone())
+            .map_err(|err| anyhow::anyhow!("failed to set systemd unit path: {err}"))?
+            .build()
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to build systemd properties proxy: {err}"))?;
+        let mut main_pid_changes = properties_proxy
+            .receive_properties_changed()
+            .await
+            .map_err(|err| {
+                anyhow::anyhow!("failed to subscribe to systemd property changes: {err}")
+            })?;
+
+        let _ = main_pid_changes.next().await;
+
+        loop {
+            let Some(changed) = main_pid_changes.next().await else {
+                if current_pid.is_some() {
+                    let _ = tx.send(RuntimeUpdate::SystemdPid { index, pid: None });
+                }
+                break;
+            };
+
+            let args = changed.args().map_err(|err| {
+                anyhow::anyhow!("failed to decode systemd properties change: {err}")
+            })?;
+
+            let Some(changed_value) = args.changed_properties().get("MainPID") else {
+                continue;
+            };
+
+            let new_pid =
+                <&zbus::zvariant::Value<'_> as std::convert::TryInto<u32>>::try_into(changed_value)
+                    .map_err(|err| anyhow::anyhow!("failed to parse systemd MainPID: {err}"))?;
+            let next_pid = if new_pid == 0 { None } else { Some(new_pid) };
+
+            if next_pid != current_pid {
+                current_pid = next_pid;
+                let _ = tx.send(RuntimeUpdate::SystemdPid {
+                    index,
+                    pid: next_pid,
+                });
+            }
+        }
+    }
 }
 
 async fn wait_pid_or_tty_targets(
@@ -1174,137 +1009,136 @@ async fn main() -> anyhow::Result<()> {
         };
 
     // Seed PROC_STATE for explicit PID/TTY inputs first (container/systemd seeds are merged later).
-    let mut watched_roots = Vec::new();
+    let mut watched_roots: Vec<(u32, u32)> = Vec::new();
     if !pids.is_empty() || !tty_filters.is_empty() {
-        watched_roots =
-            seed_proc_state_from_task_iter(&mut ebpf, &pids, &tty_filters, watch_flags)?;
-        if watched_roots.is_empty() && container.is_none() && systemd_unit.is_none() {
-            watched_roots =
+        let roots = seed_proc_state_from_task_iter(&mut ebpf, &pids, &tty_filters, watch_flags)?;
+        watched_roots.extend(roots.into_iter().map(|pid| (pid, watch_flags)));
+        if watched_roots.is_empty() && container.is_empty() && systemd_unit.is_empty() {
+            let roots =
                 wait_pid_or_tty_targets(&mut ebpf, &pids, &tty_filters, &tty_inputs, watch_flags)
                     .await?;
+            watched_roots.extend(roots.into_iter().map(|pid| (pid, watch_flags)));
         }
     }
 
-    // Resolve container PID (wait for start if needed) and seed PROC_STATE based on mode.
-    let mut container_pid = None;
-    let mut container_watch_flags = None;
-    let mut container_display = None;
-    let mut container_runtime: Option<ContainerRuntime> = None;
-    if let Some(container_name) = container.as_deref() {
+    let mut container_runtimes = Vec::new();
+    if !container.is_empty() {
         let docker = Docker::connect_with_local_defaults()?;
-        let (_container_id, main_pid) = wait_container_running(&docker, container_name).await?;
-
-        let container_watch_children = if all_container_processes {
-            true
-        } else {
-            watch_children
-        };
-        let container_flags = PROC_FLAG_WATCH_SELF
-            | if container_watch_children {
-                PROC_FLAG_WATCH_CHILDREN
+        for container_name in &container {
+            let container_watch_children = if all_container_processes {
+                true
             } else {
-                0
+                watch_children
             };
+            let container_flags = PROC_FLAG_WATCH_SELF
+                | if container_watch_children {
+                    PROC_FLAG_WATCH_CHILDREN
+                } else {
+                    0
+                };
 
-        container_pid = Some(main_pid);
-        container_watch_flags = Some(container_flags);
-        container_display = Some(format!("container={container_name} pid={main_pid}"));
-        container_runtime = Some(ContainerRuntime {
-            docker,
-            name_or_id: container_name.to_string(),
-            watch_children: container_watch_children,
-            all_processes: all_container_processes,
-        });
-
-        if all_container_processes {
-            match read_cgroup_v2_path(main_pid).and_then(|path| read_cgroup_procs(&path)) {
-                Ok(pids) => seed_proc_state_direct(&mut ebpf, &pids, container_flags)?,
-                Err(err) => {
-                    eprintln!(
-                        "Failed to read cgroup.procs for container {} (pid {}): {}. Falling back to task iterator seed.",
-                        container_name, main_pid, err
-                    );
-                    let empty_tty_filters = HashSet::new();
-                    let _ = seed_proc_state_from_task_iter(
-                        &mut ebpf,
-                        &[main_pid],
-                        &empty_tty_filters,
-                        container_flags,
-                    )?;
-                }
+            let current_pid = query_container_main_pid(&docker, container_name).await?;
+            if let Some(main_pid) = current_pid {
+                seed_container_processes(
+                    &mut ebpf,
+                    container_name,
+                    main_pid,
+                    container_flags,
+                    container_watch_children,
+                    all_container_processes,
+                )
+                .await?;
             }
-        } else if container_watch_children {
-            let empty_tty_filters = HashSet::new();
-            let _ = seed_proc_state_from_task_iter(
-                &mut ebpf,
-                &[main_pid],
-                &empty_tty_filters,
-                container_flags,
-            )?;
-        } else {
-            seed_proc_state_direct(&mut ebpf, &[main_pid], container_flags)?;
+
+            container_runtimes.push(ContainerRuntime {
+                docker: docker.clone(),
+                name_or_id: container_name.clone(),
+                watch_children: container_watch_children,
+                all_processes: all_container_processes,
+                flags: container_flags,
+                current_pid,
+            });
         }
     }
 
-    // Resolve systemd unit (wait for start if needed) and seed PROC_STATE based on mode.
-    let mut systemd_pid = None;
-    let mut systemd_watch_flags = None;
-    let mut systemd_display = None;
-    let mut systemd_runtime: Option<(zbus::Connection, OwnedObjectPath, String, u32, bool)> = None;
-    if let Some(unit_name) = systemd_unit.as_deref() {
+    let mut systemd_runtimes = Vec::new();
+    if !systemd_unit.is_empty() {
         let conn = zbus::Connection::system()
             .await
             .map_err(|err| anyhow::anyhow!("failed to connect to system bus: {err}"))?;
-        let (resolved_unit, status) = wait_systemd_unit_running(&conn, unit_name).await?;
+        let manager = ManagerProxy::new(&conn)
+            .await
+            .map_err(|err| anyhow::anyhow!("failed to create systemd manager proxy: {err}"))?;
 
-        let unit_watch_children = if all_systemd_processes {
-            true
-        } else {
-            watch_children
-        };
-        let unit_flags = PROC_FLAG_WATCH_SELF
-            | if unit_watch_children {
-                PROC_FLAG_WATCH_CHILDREN
+        for unit_name in &systemd_unit {
+            let unit_watch_children = if all_systemd_processes {
+                true
             } else {
-                0
+                watch_children
+            };
+            let unit_flags = PROC_FLAG_WATCH_SELF
+                | if unit_watch_children {
+                    PROC_FLAG_WATCH_CHILDREN
+                } else {
+                    0
+                };
+
+            let current_pid = match resolve_systemd_unit(&conn, &manager, unit_name).await {
+                Ok(resolved_unit) => {
+                    let status = query_systemd_unit_status(
+                        &resolved_unit.unit_proxy,
+                        &resolved_unit.service_proxy,
+                    )
+                    .await
+                    .map_err(|err| match err {
+                        SystemdUnitLookupError::NotFound => {
+                            anyhow::anyhow!("systemd unit {unit_name} disappeared during startup")
+                        }
+                        SystemdUnitLookupError::Other(err) => err,
+                    })?;
+
+                    if let Some(main_pid) = status.main_pid {
+                        seed_systemd_unit_processes(
+                            &mut ebpf,
+                            &conn,
+                            unit_name,
+                            Some(main_pid),
+                            unit_flags,
+                            unit_watch_children,
+                            all_systemd_processes,
+                        )
+                        .await?;
+                    }
+
+                    status.main_pid
+                }
+                Err(SystemdUnitLookupError::NotFound) => None,
+                Err(SystemdUnitLookupError::Other(err)) => return Err(err.into()),
             };
 
-        seed_systemd_unit_processes(
-            &mut ebpf,
-            &conn,
-            unit_name,
-            status.main_pid,
-            unit_flags,
-            unit_watch_children,
-            all_systemd_processes,
-        )
-        .await?;
-
-        systemd_pid = status.main_pid;
-        systemd_watch_flags = Some(unit_flags);
-        systemd_display = match status.main_pid {
-            Some(main_pid) => Some(format!("systemd-unit={unit_name} pid={main_pid}")),
-            None => Some(format!("systemd-unit={unit_name}")),
-        };
-        let unit_path = resolved_unit._unit_path;
-        systemd_runtime = Some((
-            conn,
-            unit_path,
-            unit_name.to_string(),
-            unit_flags,
-            all_systemd_processes,
-        ));
+            systemd_runtimes.push(SystemdRuntime {
+                conn: conn.clone(),
+                unit_name: unit_name.clone(),
+                watch_children: unit_watch_children,
+                all_processes: all_systemd_processes,
+                flags: unit_flags,
+                current_pid,
+            });
+        }
     }
 
-    let (mut watch_pids, mut async_ring) = build_watch_pids_and_ring(
-        &mut ebpf,
-        &watched_roots,
-        watch_flags,
-        container_pid,
-        container_watch_flags,
-        systemd_pid,
-        systemd_watch_flags,
-    )?;
+    for runtime in &container_runtimes {
+        if let Some(pid) = runtime.current_pid {
+            watched_roots.push((pid, runtime.flags));
+        }
+    }
+    for runtime in &systemd_runtimes {
+        if let Some(pid) = runtime.current_pid {
+            watched_roots.push((pid, runtime.flags));
+        }
+    }
+
+    let (mut watch_pids, mut async_ring) = build_watch_pids_and_ring(&mut ebpf, &watched_roots)?;
 
     let child_status = if watch_children {
         "watch_children=on"
@@ -1312,28 +1146,44 @@ async fn main() -> anyhow::Result<()> {
         "watch_children=off"
     };
 
-    let target_suffix = if let Some(display) = container_display.as_deref() {
+    let mut target_descriptions = Vec::new();
+    if !container_runtimes.is_empty() {
+        let container_list = container_runtimes
+            .iter()
+            .map(|runtime| runtime.name_or_id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         if all_container_processes {
-            format!(" {display} seed=all-procs")
+            target_descriptions.push(format!("containers=[{}] seed=all-procs", container_list));
         } else {
-            format!(" {display}")
+            target_descriptions.push(format!("containers=[{}]", container_list));
         }
-    } else if let Some(display) = systemd_display.as_deref() {
+    }
+    if !systemd_runtimes.is_empty() {
+        let unit_list = systemd_runtimes
+            .iter()
+            .map(|runtime| runtime.unit_name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         if all_systemd_processes {
-            format!(" {display} seed=all-procs")
+            target_descriptions.push(format!("systemd-units=[{}] seed=all-procs", unit_list));
         } else {
-            format!(" {display}")
+            target_descriptions.push(format!("systemd-units=[{}]", unit_list));
         }
-    } else {
+    }
+    let target_suffix = if target_descriptions.is_empty() {
         String::new()
+    } else {
+        format!(" {}", target_descriptions.join(" "))
     };
 
-    let has_roots = !watched_roots.is_empty();
+    let watched_root_pids: Vec<u32> = watched_roots.iter().map(|(pid, _)| *pid).collect();
+    let has_roots = !watched_root_pids.is_empty();
     if tty_inputs.is_empty() {
         if has_roots {
             println!(
                 "Watching execve syscalls for PIDs: {:?} ({}){} (Ctrl-C to exit)",
-                &watched_roots, child_status, target_suffix
+                &watched_root_pids, child_status, target_suffix
             );
         } else {
             println!(
@@ -1344,7 +1194,7 @@ async fn main() -> anyhow::Result<()> {
     } else if has_roots {
         println!(
             "Watching execve syscalls for PIDs: {:?} (TTY filters: {:?}) ({}){} (Ctrl-C to exit)",
-            &watched_roots, &tty_inputs, child_status, target_suffix
+            &watched_root_pids, &tty_inputs, child_status, target_suffix
         );
     } else {
         println!(
@@ -1353,45 +1203,76 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    if let Some((conn, unit_path, unit_name, unit_flags, all_systemd_processes)) = systemd_runtime {
-        let mut systemd_pid = systemd_pid;
-        run_systemd_event_loop(
-            &mut async_ring,
-            &mut ebpf,
-            &mut watch_pids,
-            &conn,
-            unit_path,
-            &unit_name,
-            &mut systemd_pid,
-            unit_flags,
-            all_systemd_processes,
-            watch_children,
-        )
-        .await?;
-    } else if let Some(ContainerRuntime {
-        docker,
-        name_or_id,
-        watch_children: container_watch_children,
-        all_processes: all_container_processes,
-    }) = container_runtime
-    {
-        let mut container_pid = container_pid;
-        let container_flags = container_watch_flags
-            .ok_or_else(|| anyhow::anyhow!("container flags unexpectedly missing"))?;
-        run_container_event_loop(
-            &mut async_ring,
-            &mut ebpf,
-            &mut watch_pids,
-            &docker,
-            &name_or_id,
-            &mut container_pid,
-            container_flags,
-            container_watch_children,
-            all_container_processes,
-        )
-        .await?;
-    } else {
-        run_plain_event_loop(&mut async_ring).await?;
+    let (update_tx, mut update_rx) = mpsc::unbounded_channel::<RuntimeUpdate>();
+    let mut monitor_handles = Vec::new();
+    for (index, runtime) in container_runtimes.iter().enumerate() {
+        let tx = update_tx.clone();
+        let docker = runtime.docker.clone();
+        let name_or_id = runtime.name_or_id.clone();
+        monitor_handles.push(tokio::spawn(async move {
+            if let Err(err) =
+                monitor_container_runtime(docker, name_or_id.clone(), tx.clone(), index).await
+            {
+                let _ = tx.send(RuntimeUpdate::MonitorError {
+                    label: format!("container {name_or_id}"),
+                    error: err.to_string(),
+                });
+            }
+        }));
+    }
+    for (index, runtime) in systemd_runtimes.iter().enumerate() {
+        let tx = update_tx.clone();
+        let conn = runtime.conn.clone();
+        let unit_name = runtime.unit_name.clone();
+        monitor_handles.push(tokio::spawn(async move {
+            if let Err(err) =
+                monitor_systemd_runtime(conn, unit_name.clone(), tx.clone(), index).await
+            {
+                let _ = tx.send(RuntimeUpdate::MonitorError {
+                    label: format!("systemd unit {unit_name}"),
+                    error: err.to_string(),
+                });
+            }
+        }));
+    }
+    drop(update_tx);
+
+    loop {
+        select! {
+            res = async_ring.readable_mut() => {
+                let mut guard = res?;
+                let ring = guard.get_inner_mut();
+                drain_exec_events(ring);
+                guard.clear_ready();
+            }
+
+            maybe_update = update_rx.recv() => {
+                match maybe_update {
+                    Some(RuntimeUpdate::ContainerPid { index, pid }) => {
+                        let runtime = container_runtimes.get_mut(index).ok_or_else(|| {
+                            anyhow::anyhow!("container runtime index {index} out of range")
+                        })?;
+                        apply_container_runtime_update(&mut ebpf, &mut watch_pids, runtime, pid)
+                            .await?;
+                    }
+                    Some(RuntimeUpdate::SystemdPid { index, pid }) => {
+                        let runtime = systemd_runtimes.get_mut(index).ok_or_else(|| {
+                            anyhow::anyhow!("systemd runtime index {index} out of range")
+                        })?;
+                        apply_systemd_runtime_update(&mut ebpf, &mut watch_pids, runtime, pid).await?;
+                    }
+                    Some(RuntimeUpdate::MonitorError { label, error }) => {
+                        return Err(anyhow::anyhow!("{label}: {error}"));
+                    }
+                    None => {}
+                }
+            }
+
+            _ = signal::ctrl_c() => {
+                println!("Exiting...");
+                break;
+            }
+        }
     }
 
     Ok(())
