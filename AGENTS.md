@@ -46,6 +46,23 @@ cargo fmt --check
 cargo test
 ```
 
+## Tests and coverage (recommended)
+
+Unit tests and lints:
+
+```bash
+cargo test -p tracepoint-demo --lib
+cargo clippy -p tracepoint-demo -- -D warnings
+cargo fmt --all -- --check
+```
+
+Coverage:
+
+```bash
+cargo tarpaulin --skip-clean -p tracepoint-demo --lib \
+  --exclude-files tracepoint-demo-ebpf/src/vmlinux.rs --out Stdout
+```
+
 ## eBPF constraints
 
 - `tracepoint-demo-ebpf` is built with `#![no_std]` and `#![no_main]`.

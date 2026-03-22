@@ -23,6 +23,23 @@ pub fn cstr_from_u8(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..len]).into_owned()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cstr_from_u8_ends_at_nul() {
+        let bytes = b"hello\0world";
+        assert_eq!(cstr_from_u8(bytes), "hello");
+    }
+
+    #[test]
+    fn cstr_from_u8_returns_full_string_no_nul() {
+        let bytes = b"foobar";
+        assert_eq!(cstr_from_u8(bytes), "foobar");
+    }
+}
+
 pub fn drain_exec_events(ring: &mut RingBuf<MapData>) {
     while let Some(item) = ring.next() {
         let bytes = &item;
@@ -104,10 +121,10 @@ pub fn load_tracepoint_demo_ebpf() -> anyhow::Result<Ebpf> {
 pub fn ensure_task_iter_program_loaded(ebpf: &mut Ebpf) -> anyhow::Result<()> {
     let btf = Btf::from_sys_fs()?;
     let program: &mut Iter = ebpf.program_mut("iter_tasks").unwrap().try_into()?;
-    if let Err(err) = program.load("task", &btf) {
-        if !matches!(err, ProgramError::AlreadyLoaded) {
-            return Err(err.into());
-        }
+    if let Err(err) = program.load("task", &btf)
+        && !matches!(err, ProgramError::AlreadyLoaded)
+    {
+        return Err(err.into());
     }
     Ok(())
 }
@@ -216,10 +233,12 @@ pub fn seed_proc_state_direct(ebpf: &mut Ebpf, pids: &[u32], flags: u32) -> anyh
     Ok(())
 }
 
+type WatchPidsAndRing = (UserHashMap<MapData, u32, u32>, AsyncFd<RingBuf<MapData>>);
+
 pub fn build_watch_pids_and_ring(
     ebpf: &mut Ebpf,
     watched_roots: &StdHashMap<u32, u32>,
-) -> anyhow::Result<(UserHashMap<MapData, u32, u32>, AsyncFd<RingBuf<MapData>>)> {
+) -> anyhow::Result<WatchPidsAndRing> {
     let map = ebpf
         .take_map(WATCH_PIDS_MAP)
         .ok_or_else(|| anyhow::anyhow!("map not found"))?;

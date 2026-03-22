@@ -18,7 +18,12 @@ use crate::{
             query_systemd_unit_status, resolve_systemd_unit, systemd_unit_pids,
         },
     },
-    usecase::runtime_update::RuntimeUpdate,
+    usecase::{
+        support::{
+            runtime_update::RuntimeUpdate,
+            systemd_monitor::{SystemdMonitorStatus, relay_systemd_status_updates},
+        },
+    },
 };
 
 #[derive(Debug)]
@@ -189,13 +194,10 @@ pub async fn monitor_systemd_runtime(
 ) -> anyhow::Result<()> {
     loop {
         let (resolved_unit, status) = wait_systemd_unit_running(&conn, &unit_name).await?;
-        let mut current_pid = status.main_pid;
-        let mut current_running = status.is_running();
-        let _ = tx.send(RuntimeUpdate::SystemdStatus {
-            index,
-            pid: current_pid,
-            running: current_running,
-        });
+        let initial_status = SystemdMonitorStatus {
+            pid: status.main_pid,
+            running: status.is_running(),
+        };
 
         let properties_proxy = PropertiesProxy::builder(&conn)
             .destination("org.freedesktop.systemd1")
@@ -214,22 +216,23 @@ pub async fn monitor_systemd_runtime(
 
         let _ = main_pid_changes.next().await;
 
-        loop {
-            let Some(changed) = main_pid_changes.next().await else {
-                let _ = tx.send(RuntimeUpdate::SystemdStatus {
-                    index,
-                    pid: None,
-                    running: false,
-                });
-                break;
-            };
+        relay_systemd_status_updates(
+            initial_status,
+            (main_pid_changes, resolved_unit, unit_name.clone()),
+            |(main_pid_changes, resolved_unit, unit_name)| {
+                Box::pin(async move {
+                    let Some(changed) = main_pid_changes.next().await else {
+                        return Ok(None);
+                    };
 
-            let _ = changed.args().map_err(|err| {
-                anyhow::anyhow!("failed to decode systemd properties change: {err}")
-            })?;
+                    let _ = changed.args().map_err(|err| {
+                        anyhow::anyhow!("failed to decode systemd properties change: {err}")
+                    })?;
 
-            let status =
-                query_systemd_unit_status(&resolved_unit.unit_proxy, &resolved_unit.service_proxy)
+                    let status = query_systemd_unit_status(
+                        &resolved_unit.unit_proxy,
+                        &resolved_unit.service_proxy,
+                    )
                     .await
                     .map_err(|err| match err {
                         SystemdUnitLookupError::NotFound => {
@@ -237,19 +240,17 @@ pub async fn monitor_systemd_runtime(
                         }
                         SystemdUnitLookupError::Other(err) => err,
                     })?;
-            let next_pid = status.main_pid;
-            let next_running = status.is_running();
 
-            if next_pid != current_pid || next_running != current_running {
-                current_pid = next_pid;
-                current_running = next_running;
-                let _ = tx.send(RuntimeUpdate::SystemdStatus {
-                    index,
-                    pid: next_pid,
-                    running: next_running,
-                });
-            }
-        }
+                    Ok(Some(SystemdMonitorStatus {
+                        pid: status.main_pid,
+                        running: status.is_running(),
+                    }))
+                })
+            },
+            &tx,
+            index,
+        )
+        .await?;
     }
 }
 
@@ -275,3 +276,16 @@ pub fn spawn_monitors(
     }
     monitor_handles
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn spawn_monitors_empty_returns_empty() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let handles = spawn_monitors(&[], &tx);
+        assert!(handles.is_empty());
+    }
+}
+

@@ -24,7 +24,7 @@ wiring, and external I/O.
 
 - `main.rs`: initialize logging, delegate startup, and start the runtime.
 - `interface/`: CLI parsing, output, runtime loop, and concrete client initialization.
-- `usecase/`: watch flows organized by user intent and the logic that merges roots into one watch set.
+- `usecase/`: user-intent entry points at the top level, with shared orchestration helpers under `usecase/support/`.
 - `gateway/`: all external I/O, including Aya/eBPF, procfs/cgroup, Docker, and systemd.
 
 This is intentionally "clean-architecture-like", not a full clean architecture.
@@ -53,6 +53,8 @@ there.
   the eBPF object, and hands prepared resources to the usecase layer.
 - `runtime_loop.rs` owns the top-level `tokio::select!` loop that listens to the ring buffer,
   runtime updates, and Ctrl-C.
+- `runtime_updates.rs` adapts `AppState` mutations to the generic runtime update dispatcher.
+- `runtime_update_dispatch.rs` contains the pure dispatch seam that routes `RuntimeUpdate` values.
 - `output.rs` formats the user-facing startup and shutdown messages.
 - `docker.rs` and `systemd.rs` exist to construct concrete clients; they are not business logic.
 
@@ -63,16 +65,20 @@ types because it is the boundary where those libraries enter the program.
 
 `usecase` owns the "what should the daemon do for this target selection?" decisions.
 
-- `startup.rs` translates parsed CLI input into initial watch roots, seeds initial state, and
-  prepares the runtime session.
+- `trace_selected_targets.rs` is the usecase entry point for "trace execs for the selected
+  targets".
+- `support/startup.rs` translates parsed CLI input into initial watch roots, seeds initial state, and
+  prepares the initial runtime state.
 - `watch_pid_or_tty.rs` handles "wait until matching PIDs or TTY owners appear".
 - `watch_container.rs` decides how a container should be seeded and how runtime PID changes are
   applied.
 - `watch_systemd_unit.rs` does the same for systemd units, including the fallback rules when
   `MainPID` is unavailable.
-- `watch_roots.rs` merges static roots with runtime-derived roots and synchronizes the final
+- `support/watch_roots.rs` merges static roots with runtime-derived roots and synchronizes the final
   `WATCH_PIDS` set.
-- `runtime_session.rs` starts background monitors and then enters the runtime loop.
+- `usecase/support/` contains `startup_prepare.rs`, `container_monitor.rs`, `systemd_monitor.rs`,
+  `runtime_update.rs`, `state.rs`, and `watch_roots.rs` so the top-level usecases stay focused on
+  user-visible actions while the shared orchestration stays testable.
 
 This layer is where the repository's main logic lives. It is coordinating watch strategy, not
 modelling a rich business domain.
@@ -96,21 +102,26 @@ This keeps protocol details, API quirks, and map operations out of the usecase l
 2. `interface` parses CLI args, normalizes inputs, and initializes concrete clients only when needed.
 3. `usecase` resolves the initial roots for each selected target mode.
 4. `gateway` loads the BPF object, seeds maps, and queries external systems.
-5. `usecase/watch_roots.rs` merges static and dynamic roots into the final watch set.
-6. `interface/runtime_loop.rs` runs the event loop, drains exec events, forwards runtime updates, and
-   handles Ctrl-C.
+5. `usecase/support/startup.rs` and the target-specific watch modules prepare the initial runtime state.
+6. `usecase/support/watch_roots.rs` merges static and dynamic roots into the final watch set.
+7. `usecase/trace_selected_targets.rs` starts target monitors and enters the runtime loop.
+8. `interface/runtime_loop.rs` drains exec events, forwards runtime updates, and handles Ctrl-C.
 
 ## Intent-oriented usecases
 
-The `usecase` layer is split around user intent, not internal mechanics.
+The main public entry in `usecase` is split around user intent, not internal mechanics.
+
+- `trace_selected_targets.rs` represents the user-visible goal: start tracing execs for the chosen
+  PID, TTY, container, and systemd selections.
 
 - `watch_pid_or_tty.rs` handles explicit PID and TTY watching.
 - `watch_container.rs` handles container-based watching and PID changes over time.
 - `watch_systemd_unit.rs` handles systemd-unit-based watching and activity changes.
-- `watch_roots.rs` merges roots and synchronizes the desired watch set.
 
-Support modules such as `startup.rs`, `state.rs`, `runtime_update.rs`, and `runtime_session.rs`
-exist to keep `app.rs` small.
+Support modules such as `support/startup.rs`, `support/startup_prepare.rs`,
+`support/container_monitor.rs`, `support/systemd_monitor.rs`, `support/watch_roots.rs`,
+`support/state.rs`, and `support/runtime_update.rs` exist to keep those intent-facing entries
+small while isolating integration-heavy coordination.
 
 The important point is that the user-visible modes already define the natural seams:
 
@@ -130,8 +141,8 @@ talks to.
 - `gateway/ebpf.rs`: load and attach programs, expose maps and ring buffers, seed `PROC_STATE`, and
   synchronize `WATCH_PIDS`.
 - `gateway/procfs.rs`: procfs and cgroup helpers.
-- `gateway/docker.rs`: container inspection, main-PID queries, and runtime monitoring.
-- `gateway/systemd.rs`: unit resolution, `MainPID` queries, process listing, and runtime monitoring.
+- `gateway/docker.rs`: container inspection and main-PID queries.
+- `gateway/systemd.rs`: unit resolution, `MainPID` queries, and process listing.
 
 `interface/docker.rs` and `interface/systemd.rs` are the edge where concrete clients are
 constructed.
@@ -196,9 +207,10 @@ extra request/response or command-dispatch objects.
 The current code also already has an explicit runtime dispatch shape:
 
 - background monitors send `RuntimeUpdate`
-- `runtime_loop.rs` receives the update
+- `runtime_loop.rs` receives the update and delegates update application through
+  `runtime_updates.rs`
 - the relevant usecase applies the state change
-- `watch_roots.rs` resynchronizes `WATCH_PIDS`
+- `support/watch_roots.rs` resynchronizes `WATCH_PIDS`
 
 That is controller-like enough for this daemon's needs. Turning it into a named controller layer
 would mostly rename coordination that is already clear in `interface` and `usecase`, while adding
@@ -230,5 +242,7 @@ repository does not currently need.
 - Introduce traits only when they improve tests or boundary clarity.
 - Keep `main.rs` thin.
 - Keep `tracepoint-demo-common` compatible across eBPF and userspace.
+- Keep the public usecase entry named after user intent; keep extracted startup, root-merging, and
+  monitor seams under `usecase/support/` rather than as new top-level architectural layers.
 - Add new target modes as new `usecase/watch_*.rs` modules when possible.
 - Add new external integrations under `gateway/`.

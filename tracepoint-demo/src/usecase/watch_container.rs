@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use aya::Ebpf;
-use bollard::{Docker, query_parameters::EventsOptions};
-use futures_util::StreamExt;
+use bollard::{Docker, models::EventMessage, query_parameters::EventsOptions};
+use futures_util::{StreamExt, stream::BoxStream};
 use tokio::{
     select,
     sync::mpsc,
@@ -15,7 +15,10 @@ use crate::{
         ebpf::{seed_proc_state_direct, seed_proc_state_from_task_iter},
         procfs::{read_cgroup_procs, read_cgroup_v2_path},
     },
-    usecase::runtime_update::RuntimeUpdate,
+    usecase::support::{
+        container_monitor::{ContainerMonitorBackend, monitor_container_runtime_with_backend},
+        runtime_update::RuntimeUpdate,
+    },
 };
 
 #[derive(Debug)]
@@ -26,6 +29,55 @@ pub struct ContainerRuntime {
     pub all_processes: bool,
     pub flags: u32,
     pub current_pid: Option<u32>,
+}
+
+struct DockerContainerMonitorBackend {
+    docker: Docker,
+    events: BoxStream<'static, Result<EventMessage, bollard::errors::Error>>,
+    poll_interval: Duration,
+}
+
+impl DockerContainerMonitorBackend {
+    fn new(docker: Docker, name_or_id: &str, poll_interval: Duration) -> Self {
+        let mut filters = std::collections::HashMap::new();
+        filters.insert("container".to_string(), vec![name_or_id.to_string()]);
+        filters.insert("type".to_string(), vec!["container".to_string()]);
+
+        let events = docker
+            .events(Some(EventsOptions {
+                since: None,
+                until: None,
+                filters: Some(filters),
+            }))
+            .boxed();
+
+        Self {
+            docker,
+            events,
+            poll_interval,
+        }
+    }
+}
+
+impl ContainerMonitorBackend for DockerContainerMonitorBackend {
+    async fn query_main_pid(&mut self, name_or_id: &str) -> anyhow::Result<Option<u32>> {
+        query_container_main_pid(&self.docker, name_or_id).await
+    }
+
+    async fn wait_for_next_check(&mut self, name_or_id: &str) -> anyhow::Result<()> {
+        select! {
+            maybe_event = self.events.next() => {
+                match maybe_event {
+                    Some(Ok(_)) => Ok(()),
+                    Some(Err(err)) => Err(err.into()),
+                    None => Err(anyhow::anyhow!(
+                        "Docker event stream ended while monitoring container {name_or_id}."
+                    )),
+                }
+            }
+            _ = sleep(self.poll_interval) => Ok(()),
+        }
+    }
 }
 
 pub async fn seed_container_processes(
@@ -98,49 +150,9 @@ pub async fn monitor_container_runtime(
     tx: mpsc::UnboundedSender<RuntimeUpdate>,
     index: usize,
 ) -> anyhow::Result<()> {
-    let mut filters = std::collections::HashMap::new();
-    filters.insert("container".to_string(), vec![name_or_id.clone()]);
-    filters.insert("type".to_string(), vec!["container".to_string()]);
-
-    let mut events = docker.events(Some(EventsOptions {
-        since: None,
-        until: None,
-        filters: Some(filters),
-    }));
-
-    let mut current_pid = query_container_main_pid(&docker, &name_or_id).await?;
-    let _ = tx.send(RuntimeUpdate::ContainerPid {
-        index,
-        pid: current_pid,
-    });
-
-    loop {
-        select! {
-            maybe_event = events.next() => {
-                match maybe_event {
-                    Some(Ok(_)) => {}
-                    Some(Err(err)) => return Err(err.into()),
-                    None => return Err(anyhow::anyhow!(
-                        "Docker event stream ended while monitoring container {name_or_id}."
-                    )),
-                }
-
-                let next_pid = query_container_main_pid(&docker, &name_or_id).await?;
-                if next_pid != current_pid {
-                    current_pid = next_pid;
-                    let _ = tx.send(RuntimeUpdate::ContainerPid { index, pid: next_pid });
-                }
-            }
-
-            _ = sleep(Duration::from_secs(1)) => {
-                let next_pid = query_container_main_pid(&docker, &name_or_id).await?;
-                if next_pid != current_pid {
-                    current_pid = next_pid;
-                    let _ = tx.send(RuntimeUpdate::ContainerPid { index, pid: next_pid });
-                }
-            }
-        }
-    }
+    let mut backend =
+        DockerContainerMonitorBackend::new(docker, &name_or_id, Duration::from_secs(1));
+    monitor_container_runtime_with_backend(&mut backend, &name_or_id, &tx, index).await
 }
 
 pub fn spawn_monitors(
@@ -164,4 +176,36 @@ pub fn spawn_monitors(
         }));
     }
     monitor_handles
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bollard::Docker;
+
+    #[tokio::test]
+    async fn spawn_monitors_empty_returns_empty() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let handles = spawn_monitors(&[], &tx);
+        assert!(handles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn spawn_monitors_non_empty_returns_handles() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let runtime = ContainerRuntime {
+            docker: Docker::connect_with_local_defaults().unwrap(),
+            name_or_id: "dummy".to_string(),
+            watch_children: true,
+            all_processes: false,
+            flags: 0,
+            current_pid: None,
+        };
+        let handles = spawn_monitors(&[runtime], &tx);
+        assert_eq!(handles.len(), 1);
+        // drop handles to avoid waiting for hanging background tasks in tests
+        for h in handles {
+            h.abort();
+        }
+    }
 }

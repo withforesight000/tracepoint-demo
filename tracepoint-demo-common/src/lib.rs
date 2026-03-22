@@ -34,3 +34,24 @@ pub const PROC_STATE_MAP: &str = "PROC_STATE";
 
 pub const PROC_FLAG_WATCH_SELF: u32 = 1 << 0;
 pub const PROC_FLAG_WATCH_CHILDREN: u32 = 1 << 1;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem;
+
+    #[test]
+    fn taskrel_and_exec_event_sizes_are_valid() {
+        assert_eq!(mem::size_of::<TaskRel>(), 72);
+        assert_eq!(mem::size_of::<ExecEvent>(), 300);
+    }
+
+    #[test]
+    fn constants_are_defined() {
+        assert_eq!(EXEC_EVENTS_MAP, "EXEC_EVENTS");
+        assert_eq!(WATCH_PIDS_MAP, "WATCH_PIDS");
+        assert_eq!(PROC_STATE_MAP, "PROC_STATE");
+        assert_eq!(PROC_FLAG_WATCH_SELF, 1);
+        assert_eq!(PROC_FLAG_WATCH_CHILDREN, 2);
+    }
+}

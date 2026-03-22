@@ -1,13 +1,25 @@
 use tokio::sync::mpsc;
 
+use aya::Ebpf;
+use bollard::Docker;
+
 use crate::{
-    interface::runtime_loop,
+    interface::{cli::CliArgs, runtime_loop},
     usecase::{
-        runtime_update::RuntimeUpdate, state::PreparedApp, watch_container, watch_systemd_unit,
+        support::{runtime_update::RuntimeUpdate, startup::prepare},
+        watch_container, watch_systemd_unit,
     },
 };
 
-pub async fn run(mut prepared: PreparedApp) -> anyhow::Result<()> {
+pub struct StartupResources {
+    pub ebpf: Ebpf,
+    pub docker: Option<Docker>,
+    pub systemd_conn: Option<zbus::Connection>,
+}
+
+pub async fn run(args: CliArgs, resources: StartupResources) -> anyhow::Result<()> {
+    let mut prepared = prepare(args, resources).await?;
+
     let (update_tx, mut update_rx) = mpsc::unbounded_channel::<RuntimeUpdate>();
     let mut monitor_handles = Vec::new();
     monitor_handles.extend(watch_container::spawn_monitors(

@@ -55,6 +55,28 @@ sudo cargo run --release -- --container my-service --systemd-unit sshd.service
 sudo cargo run --release -- --systemd-unit sshd.service --systemd-unit user@1000.service --all-systemd-processes
 ```
 
+## Testing and coverage
+
+Unit tests:
+
+```bash
+cargo test -p tracepoint-demo --lib
+```
+
+Static checks:
+
+```bash
+cargo clippy -p tracepoint-demo -- -D warnings
+cargo fmt --all -- --check
+```
+
+Coverage (tarpaulin) focuses on userspace logic and skips eBPF/gateway integration boilerplate:
+
+```bash
+cargo tarpaulin --skip-clean -p tracepoint-demo --lib \
+  --exclude-files tracepoint-demo-ebpf/src/vmlinux.rs --out Stdout
+```
+
 Each line of output looks like:
 
 ```text

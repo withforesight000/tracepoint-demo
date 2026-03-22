@@ -36,6 +36,17 @@ fn is_zbus_method_error(err: &ZbusError, expected: &str) -> bool {
     matches!(err, ZbusError::MethodError(name, _, _) if **name == expected)
 }
 
+fn collect_unique_unit_pids(entries: Vec<(String, u32, String)>) -> Vec<u32> {
+    let mut pids = Vec::new();
+    let mut seen = HashSet::new();
+    for (_, pid, _) in entries {
+        if pid != 0 && seen.insert(pid) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
 pub async fn query_systemd_unit_status(
     unit_proxy: &UnitProxy<'_>,
     service_proxy: &ServiceProxy<'_>,
@@ -111,12 +122,50 @@ pub async fn systemd_unit_pids(
 ) -> anyhow::Result<Vec<u32>> {
     let manager = ManagerProxy::new(conn).await?;
     let entries = manager.get_unit_processes(unit_name.to_string()).await?;
-    let mut pids = Vec::new();
-    let mut seen = HashSet::new();
-    for (_, pid, _) in entries {
-        if pid != 0 && seen.insert(pid) {
-            pids.push(pid);
-        }
+    Ok(collect_unique_unit_pids(entries))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn systemd_unit_status_is_running_for_active_states() {
+        let active = SystemdUnitStatus {
+            active_state: "active".to_string(),
+            sub_state: "running".to_string(),
+            main_pid: Some(1),
+        };
+        let reloading = SystemdUnitStatus {
+            active_state: "reloading".to_string(),
+            sub_state: "reload".to_string(),
+            main_pid: Some(2),
+        };
+
+        assert!(active.is_running());
+        assert!(reloading.is_running());
     }
-    Ok(pids)
+
+    #[test]
+    fn systemd_unit_status_is_not_running_for_other_states() {
+        let status = SystemdUnitStatus {
+            active_state: "inactive".to_string(),
+            sub_state: "dead".to_string(),
+            main_pid: None,
+        };
+
+        assert!(!status.is_running());
+    }
+
+    #[test]
+    fn collect_unique_unit_pids_deduplicates_and_skips_zero() {
+        let pids = collect_unique_unit_pids(vec![
+            ("sshd.service".to_string(), 0, "root".to_string()),
+            ("sshd.service".to_string(), 101, "root".to_string()),
+            ("sshd.service".to_string(), 101, "root".to_string()),
+            ("sshd.service".to_string(), 202, "daemon".to_string()),
+        ]);
+
+        assert_eq!(pids, vec![101, 202]);
+    }
 }
