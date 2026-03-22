@@ -32,9 +32,6 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Install nightly Rust toolchain for eBPF builds
-        run: rustup toolchain install nightly --profile minimal --component rust-src --target bpfel-unknown-none
-
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
