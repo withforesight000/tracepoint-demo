@@ -72,8 +72,18 @@ pub fn collect_watch_roots(
 ) -> StdHashMap<u32, u32> {
     let mut roots = static_roots.clone();
 
-    merge_runtime_roots(&mut roots, container_runtimes.iter().map(|runtime| (runtime.current_pid, runtime.flags)));
-    merge_runtime_roots(&mut roots, systemd_runtimes.iter().map(|runtime| (runtime.current_pid, runtime.flags)));
+    merge_runtime_roots(
+        &mut roots,
+        container_runtimes
+            .iter()
+            .map(|runtime| (runtime.current_pid, runtime.flags)),
+    );
+    merge_runtime_roots(
+        &mut roots,
+        systemd_runtimes
+            .iter()
+            .map(|runtime| (runtime.current_pid, runtime.flags)),
+    );
 
     roots
 }
@@ -83,16 +93,10 @@ pub fn sync_watch_pids(
     current_roots: &mut StdHashMap<u32, u32>,
     desired_roots: &StdHashMap<u32, u32>,
 ) -> anyhow::Result<()> {
-    apply_watch_root_changes(
-        current_roots,
-        desired_roots,
-        |change| match change {
-            WatchRootChange::Remove(pid) => watch_pids.remove(&pid).map_err(Into::into),
-            WatchRootChange::Upsert(pid, flags) => {
-                watch_pids.insert(pid, flags, 0).map_err(Into::into)
-            }
-        },
-    )
+    apply_watch_root_changes(current_roots, desired_roots, |change| match change {
+        WatchRootChange::Remove(pid) => watch_pids.remove(&pid).map_err(Into::into),
+        WatchRootChange::Upsert(pid, flags) => watch_pids.insert(pid, flags, 0).map_err(Into::into),
+    })
 }
 
 #[cfg(test)]
@@ -237,4 +241,3 @@ mod tests {
         assert_eq!(current, desired);
     }
 }
-

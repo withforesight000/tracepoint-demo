@@ -1,5 +1,6 @@
 use aya::Ebpf;
 
+use crate::interface::runtime_update_dispatch::{RuntimeUpdateHandler, handle_runtime_update};
 use crate::usecase::{
     support::{
         runtime_update::RuntimeUpdate,
@@ -9,7 +10,6 @@ use crate::usecase::{
     watch_container::apply_container_runtime_update,
     watch_systemd_unit::apply_systemd_runtime_update,
 };
-use crate::interface::runtime_update_dispatch::{RuntimeUpdateHandler, handle_runtime_update};
 
 struct AppRuntimeUpdateHandler<'a> {
     ebpf: &'a mut Ebpf,
@@ -18,9 +18,11 @@ struct AppRuntimeUpdateHandler<'a> {
 
 impl RuntimeUpdateHandler for AppRuntimeUpdateHandler<'_> {
     async fn apply_container_pid(&mut self, index: usize, pid: Option<u32>) -> anyhow::Result<()> {
-        let runtime = self.state.container_runtimes.get_mut(index).ok_or_else(|| {
-            anyhow::anyhow!("container runtime index {index} out of range")
-        })?;
+        let runtime = self
+            .state
+            .container_runtimes
+            .get_mut(index)
+            .ok_or_else(|| anyhow::anyhow!("container runtime index {index} out of range"))?;
         apply_container_runtime_update(self.ebpf, runtime, pid).await?;
         refresh_watch_pids(self.state)
     }
@@ -31,9 +33,11 @@ impl RuntimeUpdateHandler for AppRuntimeUpdateHandler<'_> {
         pid: Option<u32>,
         running: bool,
     ) -> anyhow::Result<()> {
-        let runtime = self.state.systemd_runtimes.get_mut(index).ok_or_else(|| {
-            anyhow::anyhow!("systemd runtime index {index} out of range")
-        })?;
+        let runtime = self
+            .state
+            .systemd_runtimes
+            .get_mut(index)
+            .ok_or_else(|| anyhow::anyhow!("systemd runtime index {index} out of range"))?;
         apply_systemd_runtime_update(self.ebpf, runtime, pid, running).await?;
         refresh_watch_pids(self.state)
     }

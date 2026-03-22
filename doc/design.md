@@ -5,6 +5,57 @@
 This note describes the current user-space split in `tracepoint-demo`. It is a snapshot of the
 implemented architecture, not a plan for a future rewrite.
 
+It is also meant to be a reading guide for contributors who do not yet know the repository well.
+If you are opening this project for the first time, this document should help you answer two
+questions quickly:
+
+- where the main execution path starts
+- which file to open next for the kind of change you want to make
+
+## First orientation
+
+Before diving into the layers, keep this mental model in mind:
+
+- the CLI chooses target-selection modes such as PID, TTY, container, or systemd unit
+- startup code resolves those selections into an initial watch set
+- runtime monitors keep that watch set up to date while the daemon runs
+- the eBPF side emits `execve` events for watched processes and userspace prints them
+
+The workspace is split across three crates:
+
+- `tracepoint-demo/`: userspace daemon and the main code discussed in this document
+- `tracepoint-demo-ebpf/`: kernel-side eBPF programs attached by userspace
+- `tracepoint-demo-common/`: structs and constants shared across the userspace/eBPF boundary
+
+If you only want to understand the userspace architecture, start with `tracepoint-demo/` and come
+back to the eBPF crate later.
+
+## Suggested reading order
+
+For a first pass through the code, read these files in order:
+
+1. `tracepoint-demo/src/main.rs`: process entry point
+2. `tracepoint-demo/src/interface/app_builder.rs`: CLI parsing and concrete dependency setup
+3. `tracepoint-demo/src/usecase/trace_selected_targets.rs`: user-intent entry point
+4. `tracepoint-demo/src/usecase/support/startup.rs`: initial target resolution and startup state
+5. `tracepoint-demo/src/usecase/watch_*.rs`: target-mode-specific runtime behavior
+6. `tracepoint-demo/src/interface/runtime_loop.rs`: main async loop while the daemon is running
+7. `tracepoint-demo/src/gateway/*.rs`: actual system and eBPF integration details
+
+That path follows the same order the program follows at runtime, so it is the fastest route to a
+working mental model.
+
+## Key terms
+
+Some terms appear repeatedly in the code and are easy to confuse on a first read:
+
+- watch root: a PID that userspace explicitly asks the kernel-side logic to track
+- static watch roots: roots discovered at startup from explicit PID or TTY selection
+- runtime-derived roots: roots learned later from Docker or systemd monitoring
+- watch set: the final merged PID set written into `WATCH_PIDS`
+- `PROC_STATE`: kernel-side per-process cache used while following descendants
+- runtime update: a userspace message saying that container or systemd state changed
+
 ## Why the split exists
 
 `main.rs` is now a thin composition root because the daemon grew beyond simple PID tracing:
@@ -35,6 +86,26 @@ The split follows where the code's complexity actually lives:
 - kernel and system integration
 
 It does not introduce layers that only rename these same responsibilities.
+
+## If you want to change...
+
+This section is the quickest file lookup guide for common changes.
+
+- CLI flags or input normalization: `tracepoint-demo/src/interface/cli.rs`
+- startup wiring and concrete client creation: `tracepoint-demo/src/interface/app_builder.rs`
+- startup target resolution: `tracepoint-demo/src/usecase/support/startup.rs`
+- PID or TTY wait behavior: `tracepoint-demo/src/usecase/watch_pid_or_tty.rs`
+- container runtime behavior: `tracepoint-demo/src/usecase/watch_container.rs`
+- systemd runtime behavior: `tracepoint-demo/src/usecase/watch_systemd_unit.rs`
+- watch-set merge logic: `tracepoint-demo/src/usecase/support/watch_roots.rs`
+- runtime update dispatch: `tracepoint-demo/src/interface/runtime_updates.rs`
+- main event loop: `tracepoint-demo/src/interface/runtime_loop.rs`
+- eBPF program loading, maps, and ring buffer handling: `tracepoint-demo/src/gateway/ebpf.rs`
+- kernel-side event generation: `tracepoint-demo-ebpf/src/main.rs`
+
+If you are not sure where a behavior lives, start from `trace_selected_targets.rs` and follow the
+call chain outward. In this repository, that is usually faster than searching for an abstract
+architecture term like "service" or "controller".
 
 ## What each layer owns in this repository
 
@@ -106,6 +177,20 @@ This keeps protocol details, API quirks, and map operations out of the usecase l
 6. `usecase/support/watch_roots.rs` merges static and dynamic roots into the final watch set.
 7. `usecase/trace_selected_targets.rs` starts target monitors and enters the runtime loop.
 8. `interface/runtime_loop.rs` drains exec events, forwards runtime updates, and handles Ctrl-C.
+
+## One concrete execution trace
+
+For a concrete example, consider `--container my-service`:
+
+1. `interface/app_builder.rs` parses the CLI and opens a Docker client.
+2. `usecase/trace_selected_targets.rs` calls into startup preparation.
+3. `usecase/support/startup.rs` queries the container's current main PID and seeds initial watch state.
+4. `usecase/support/watch_roots.rs` builds the merged watch set and writes it into `WATCH_PIDS`.
+5. `usecase/watch_container.rs` spawns a monitor for later container PID changes.
+6. `interface/runtime_loop.rs` keeps draining exec events and applying runtime updates.
+7. `gateway/ebpf.rs` remains the layer that actually talks to maps, programs, and the ring buffer.
+
+If you can follow that path, the rest of the repository will feel much less opaque.
 
 ## Intent-oriented usecases
 

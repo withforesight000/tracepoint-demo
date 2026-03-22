@@ -27,10 +27,9 @@ fn main_pid_from_inspect(
     inspect: &ContainerInspectResponse,
     name_or_id: &str,
 ) -> anyhow::Result<Option<u32>> {
-    inspect
-        .state
-        .as_ref()
-        .map_or(Ok(None), |state| main_pid_from_container_state(state, name_or_id))
+    inspect.state.as_ref().map_or(Ok(None), |state| {
+        main_pid_from_container_state(state, name_or_id)
+    })
 }
 
 pub async fn query_container_main_pid(
@@ -40,7 +39,9 @@ pub async fn query_container_main_pid(
     match docker.inspect_container(name_or_id, None).await {
         Ok(inspect) => main_pid_from_inspect(&inspect, name_or_id),
         Err(err) => match err {
-            BollardError::DockerResponseServerError { status_code: 404, .. } => Ok(None),
+            BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            } => Ok(None),
             _ => Err(err.into()),
         },
     }

@@ -109,11 +109,8 @@ pub(crate) async fn prepare_runtime_plan<TBackend: StartupPrepareBackend>(
         false => return Err(anyhow::anyhow!("systemd connection is not initialized")),
     };
 
-    let current_watch_roots = backend.collect_watch_roots(
-        &static_watch_roots,
-        &container_runtimes,
-        &systemd_runtimes,
-    );
+    let current_watch_roots =
+        backend.collect_watch_roots(&static_watch_roots, &container_runtimes, &systemd_runtimes);
     let target_descriptions = backend.collect_target_descriptions(
         &container_runtimes,
         &systemd_runtimes,

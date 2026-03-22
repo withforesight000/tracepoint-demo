@@ -57,14 +57,9 @@ impl StartupPrepareBackend for StartupPrepareAdapter<'_> {
         }
 
         if static_watch_roots.is_empty() && !has_runtime_targets {
-            let roots = wait_pid_or_tty_targets(
-                self.ebpf,
-                pids,
-                tty_filters,
-                tty_inputs,
-                watch_flags,
-            )
-            .await?;
+            let roots =
+                wait_pid_or_tty_targets(self.ebpf, pids, tty_filters, tty_inputs, watch_flags)
+                    .await?;
             for pid in roots {
                 add_watch_root(&mut static_watch_roots, pid, watch_flags);
             }

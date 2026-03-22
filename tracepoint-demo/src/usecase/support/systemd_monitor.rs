@@ -22,7 +22,9 @@ where
     TNext: Send,
     TNext: for<'a> FnMut(
         &'a mut TState,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<SystemdMonitorStatus>>> + Send + 'a>>,
+    ) -> Pin<
+        Box<dyn Future<Output = anyhow::Result<Option<SystemdMonitorStatus>>> + Send + 'a>,
+    >,
 {
     let mut current = initial_status;
     let _ = tx.send(RuntimeUpdate::SystemdStatus {
@@ -55,7 +57,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::VecDeque, sync::{Arc, Mutex}};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
 
     #[tokio::test]
     async fn relay_systemd_status_updates_emits_changes_and_stop_event() {

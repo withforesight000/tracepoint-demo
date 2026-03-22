@@ -64,11 +64,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut backend = FakeContainerMonitorBackend {
             pids: VecDeque::from([Ok(Some(10)), Ok(Some(10)), Ok(Some(20))]),
-            waits: VecDeque::from([
-                Ok(()),
-                Ok(()),
-                Err(anyhow::anyhow!("stop monitoring")),
-            ]),
+            waits: VecDeque::from([Ok(()), Ok(()), Err(anyhow::anyhow!("stop monitoring"))]),
         };
 
         let err = monitor_container_runtime_with_backend(&mut backend, "web", &tx, 3)

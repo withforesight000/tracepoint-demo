@@ -18,11 +18,9 @@ use crate::{
             query_systemd_unit_status, resolve_systemd_unit, systemd_unit_pids,
         },
     },
-    usecase::{
-        support::{
-            runtime_update::RuntimeUpdate,
-            systemd_monitor::{SystemdMonitorStatus, relay_systemd_status_updates},
-        },
+    usecase::support::{
+        runtime_update::RuntimeUpdate,
+        systemd_monitor::{SystemdMonitorStatus, relay_systemd_status_updates},
     },
 };
 
@@ -288,4 +286,3 @@ mod tests {
         assert!(handles.is_empty());
     }
 }
-
