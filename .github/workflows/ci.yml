@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: env
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: Rust Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install nightly Rust toolchain for eBPF builds
+        run: rustup toolchain install nightly --profile minimal --component rust-src --target bpfel-unknown-none
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Install bpf-linker
+        run: cargo install --locked bpf-linker
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy -p tracepoint-demo -- -D warnings
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Run userspace unit tests
+        run: cargo test -p tracepoint-demo --lib --target x86_64-unknown-linux-gnu
