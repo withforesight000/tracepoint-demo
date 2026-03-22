@@ -44,6 +44,7 @@ Choose a target set:
 
 - PID(s) and TTY filter(s) are standalone modes and cannot be combined with container/systemd targets.
 - Docker containers and systemd units can be specified multiple times and combined with each other.
+  They may also be combined in the same invocation.
 
 - PID(s): use repeated `--pid` flags or positional PID arguments.
 - TTY filter(s): use repeated `--tty` values to select processes by controlling terminal.

@@ -30,6 +30,7 @@ use zbus_systemd::systemd1::{ManagerProxy, ServiceProxy, UnitProxy};
 #[command(group(
     ArgGroup::new("target")
         .required(true)
+        .multiple(true)
         .args(["pid", "positional_pids", "tty", "container", "systemd_unit"])
 ))]
 struct CliArgs {
