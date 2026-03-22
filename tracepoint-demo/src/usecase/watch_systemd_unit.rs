@@ -1,32 +1,22 @@
 use std::collections::HashSet;
 
 use aya::Ebpf;
-use futures_util::StreamExt;
-use tokio::{
-    select, signal,
-    sync::mpsc,
-    time::{Duration, sleep},
-};
-use zbus::fdo::PropertiesProxy;
-use zbus_systemd::systemd1::ManagerProxy;
+use std::time::Duration;
+use tokio::sync::mpsc;
 
 use crate::{
-    gateway::{
-        ebpf::{seed_proc_state_direct, seed_proc_state_from_task_iter},
-        systemd::{
-            ResolvedSystemdUnit, SystemdUnitLookupError, SystemdUnitStatus,
-            query_systemd_unit_status, resolve_systemd_unit, systemd_unit_pids,
+    gateway::ebpf::{seed_proc_state_direct, seed_proc_state_from_task_iter},
+    usecase::{
+        ports::{
+            SharedSystemdRuntimePort, StatusReporter, SystemdRuntimePort, SystemdUnitRuntimeStatus,
+            WaitPort,
         },
-    },
-    usecase::support::{
-        runtime_update::RuntimeUpdate,
-        systemd_monitor::{SystemdMonitorStatus, relay_systemd_status_updates},
+        support::runtime_update::RuntimeUpdate,
     },
 };
 
-#[derive(Debug)]
 pub struct SystemdRuntime {
-    pub conn: zbus::Connection,
+    pub runtime: SharedSystemdRuntimePort,
     pub unit_name: String,
     pub watch_children: bool,
     pub all_processes: bool,
@@ -35,129 +25,107 @@ pub struct SystemdRuntime {
     pub current_running: bool,
 }
 
-pub async fn wait_systemd_unit_running<'a>(
-    conn: &'a zbus::Connection,
+pub(crate) struct SystemdSeedSpec<'a> {
+    pub unit_name: &'a str,
+    pub main_pid: Option<u32>,
+    pub flags: u32,
+    pub watch_children: bool,
+    pub all_processes: bool,
+}
+
+pub async fn wait_systemd_unit_running<
+    TReporter: StatusReporter + ?Sized,
+    TWait: WaitPort + ?Sized,
+>(
+    runtime: &dyn SystemdRuntimePort,
+    reporter: &mut TReporter,
+    wait_port: &mut TWait,
     unit_name: &str,
-) -> anyhow::Result<(ResolvedSystemdUnit<'a>, SystemdUnitStatus)> {
+) -> anyhow::Result<SystemdUnitRuntimeStatus> {
     let mut last_notice = String::new();
-    let manager = ManagerProxy::new(conn)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed to create systemd manager proxy: {err}"))?;
-    let mut resolved_unit: Option<ResolvedSystemdUnit<'_>> = None;
 
     loop {
-        if resolved_unit.is_none() {
-            match resolve_systemd_unit(conn, &manager, unit_name).await {
-                Ok(unit) => {
-                    resolved_unit = Some(unit);
-                }
-                Err(SystemdUnitLookupError::NotFound) => {
-                    let notice = format!("Waiting for systemd unit {unit_name} to exist...");
-                    if notice != last_notice {
-                        println!("{notice}");
-                        last_notice = notice;
-                    }
-                }
-                Err(SystemdUnitLookupError::Other(err)) => return Err(err),
-            }
+        let status = runtime.current_status(unit_name).await?;
+        if status.is_running() {
+            return Ok(status);
         }
 
-        if let Some(cached_unit) = resolved_unit.as_ref() {
-            match query_systemd_unit_status(&cached_unit.unit_proxy, &cached_unit.service_proxy)
-                .await
-            {
-                Ok(status) => {
-                    if status.is_running() {
-                        let resolved_unit = resolved_unit
-                            .take()
-                            .expect("resolved_unit should exist when status is running");
-                        return Ok((resolved_unit, status));
-                    }
+        let notice = if !status.exists {
+            format!("Waiting for systemd unit {unit_name} to exist...")
+        } else {
+            format!(
+                "Waiting for systemd unit {unit_name} to start (state={} substate={})...",
+                status.active_state.as_deref().unwrap_or("unknown"),
+                status.sub_state.as_deref().unwrap_or("unknown"),
+            )
+        };
 
-                    let notice = format!(
-                        "Waiting for systemd unit {unit_name} to start (state={} substate={})...",
-                        status.active_state, status.sub_state
-                    );
-                    if notice != last_notice {
-                        println!("{notice}");
-                        last_notice = notice;
-                    }
-                }
-                Err(SystemdUnitLookupError::NotFound) => {
-                    resolved_unit = None;
-                    let notice = format!("Waiting for systemd unit {unit_name} to exist...");
-                    if notice != last_notice {
-                        println!("{notice}");
-                        last_notice = notice;
-                    }
-                }
-                Err(SystemdUnitLookupError::Other(err)) => return Err(err),
-            }
+        if notice != last_notice {
+            reporter.info(notice.clone());
+            last_notice = notice;
         }
 
-        select! {
-            _ = sleep(Duration::from_secs(1)) => {}
-            _ = signal::ctrl_c() => return Err(anyhow::anyhow!(
-                "Interrupted while waiting for systemd unit {unit_name} state to change."
-            )),
-        }
+        wait_port
+            .wait(
+                Duration::from_secs(1),
+                format!("Interrupted while waiting for systemd unit {unit_name} state to change."),
+            )
+            .await?;
     }
 }
 
-pub async fn seed_systemd_unit_processes(
+pub(crate) async fn seed_systemd_unit_processes<TReporter: StatusReporter + ?Sized>(
     ebpf: &mut Ebpf,
-    conn: &zbus::Connection,
-    unit_name: &str,
-    main_pid: Option<u32>,
-    unit_flags: u32,
-    unit_watch_children: bool,
-    all_systemd_processes: bool,
+    reporter: &mut TReporter,
+    runtime: &dyn SystemdRuntimePort,
+    spec: SystemdSeedSpec<'_>,
 ) -> anyhow::Result<()> {
-    if all_systemd_processes {
-        match systemd_unit_pids(conn, unit_name).await {
-            Ok(pids) => seed_proc_state_direct(ebpf, &pids, unit_flags)?,
+    if spec.all_processes {
+        match runtime.unit_pids(spec.unit_name).await {
+            Ok(pids) => seed_proc_state_direct(ebpf, &pids, spec.flags)?,
             Err(err) => {
-                let main_pid = main_pid.ok_or_else(|| {
+                let main_pid = spec.main_pid.ok_or_else(|| {
                     anyhow::anyhow!(
                         "Failed to get all processes for systemd unit {}: {}. No MainPID is available for fallback.",
-                        unit_name, err
+                        spec.unit_name, err
                     )
                 })?;
-                eprintln!(
+                reporter.warn(format!(
                     "Failed to get all processes for systemd unit {}: {}. Falling back to task iterator seed.",
-                    unit_name, err
-                );
+                    spec.unit_name, err
+                ));
                 let empty_tty_filters = HashSet::new();
                 let _ = seed_proc_state_from_task_iter(
                     ebpf,
                     &[main_pid],
                     &empty_tty_filters,
-                    unit_flags,
+                    spec.flags,
                 )?;
             }
         }
         return Ok(());
     }
 
-    let main_pid = main_pid.ok_or_else(|| {
+    let main_pid = spec.main_pid.ok_or_else(|| {
         anyhow::anyhow!(
             "systemd unit {} has no MainPID while active. Use --all-systemd-processes for units without MainPID.",
-            unit_name
+            spec.unit_name
         )
     })?;
 
-    if unit_watch_children {
+    if spec.watch_children {
         let empty_tty_filters = HashSet::new();
-        let _ = seed_proc_state_from_task_iter(ebpf, &[main_pid], &empty_tty_filters, unit_flags)?;
+        let _ = seed_proc_state_from_task_iter(ebpf, &[main_pid], &empty_tty_filters, spec.flags)?;
     } else {
-        seed_proc_state_direct(ebpf, &[main_pid], unit_flags)?;
+        seed_proc_state_direct(ebpf, &[main_pid], spec.flags)?;
     }
 
     Ok(())
 }
 
-pub async fn apply_systemd_runtime_update(
+pub async fn apply_systemd_runtime_update<TReporter: StatusReporter + ?Sized>(
     ebpf: &mut Ebpf,
+    reporter: &mut TReporter,
     runtime: &mut SystemdRuntime,
     next_pid: Option<u32>,
     running: bool,
@@ -169,12 +137,15 @@ pub async fn apply_systemd_runtime_update(
     if running && (runtime.all_processes || next_pid.is_some()) {
         seed_systemd_unit_processes(
             ebpf,
-            &runtime.conn,
-            &runtime.unit_name,
-            next_pid,
-            runtime.flags,
-            runtime.watch_children,
-            runtime.all_processes,
+            reporter,
+            runtime.runtime.as_ref(),
+            SystemdSeedSpec {
+                unit_name: &runtime.unit_name,
+                main_pid: next_pid,
+                flags: runtime.flags,
+                watch_children: runtime.watch_children,
+                all_processes: runtime.all_processes,
+            },
         )
         .await?;
     }
@@ -184,95 +155,19 @@ pub async fn apply_systemd_runtime_update(
     Ok(())
 }
 
-pub async fn monitor_systemd_runtime(
-    conn: zbus::Connection,
-    unit_name: String,
-    tx: mpsc::UnboundedSender<RuntimeUpdate>,
-    index: usize,
-) -> anyhow::Result<()> {
-    loop {
-        let (resolved_unit, status) = wait_systemd_unit_running(&conn, &unit_name).await?;
-        let initial_status = SystemdMonitorStatus {
-            pid: status.main_pid,
-            running: status.is_running(),
-        };
-
-        let properties_proxy = PropertiesProxy::builder(&conn)
-            .destination("org.freedesktop.systemd1")
-            .map_err(|err| anyhow::anyhow!("failed to set systemd destination: {err}"))?
-            .path(resolved_unit._unit_path.clone())
-            .map_err(|err| anyhow::anyhow!("failed to set systemd unit path: {err}"))?
-            .build()
-            .await
-            .map_err(|err| anyhow::anyhow!("failed to build systemd properties proxy: {err}"))?;
-        let mut main_pid_changes = properties_proxy
-            .receive_properties_changed()
-            .await
-            .map_err(|err| {
-                anyhow::anyhow!("failed to subscribe to systemd property changes: {err}")
-            })?;
-
-        let _ = main_pid_changes.next().await;
-
-        relay_systemd_status_updates(
-            initial_status,
-            (main_pid_changes, resolved_unit, unit_name.clone()),
-            |(main_pid_changes, resolved_unit, unit_name)| {
-                Box::pin(async move {
-                    let Some(changed) = main_pid_changes.next().await else {
-                        return Ok(None);
-                    };
-
-                    let _ = changed.args().map_err(|err| {
-                        anyhow::anyhow!("failed to decode systemd properties change: {err}")
-                    })?;
-
-                    let status = query_systemd_unit_status(
-                        &resolved_unit.unit_proxy,
-                        &resolved_unit.service_proxy,
-                    )
-                    .await
-                    .map_err(|err| match err {
-                        SystemdUnitLookupError::NotFound => {
-                            anyhow::anyhow!("systemd unit {unit_name} disappeared while monitoring")
-                        }
-                        SystemdUnitLookupError::Other(err) => err,
-                    })?;
-
-                    Ok(Some(SystemdMonitorStatus {
-                        pid: status.main_pid,
-                        running: status.is_running(),
-                    }))
-                })
-            },
-            &tx,
-            index,
-        )
-        .await?;
-    }
-}
-
 pub fn spawn_monitors(
     systemd_runtimes: &[SystemdRuntime],
     update_tx: &mpsc::UnboundedSender<RuntimeUpdate>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
-    let mut monitor_handles = Vec::new();
-    for (index, runtime) in systemd_runtimes.iter().enumerate() {
-        let tx = update_tx.clone();
-        let conn = runtime.conn.clone();
-        let unit_name = runtime.unit_name.clone();
-        monitor_handles.push(tokio::spawn(async move {
-            if let Err(err) =
-                monitor_systemd_runtime(conn, unit_name.clone(), tx.clone(), index).await
-            {
-                let _ = tx.send(RuntimeUpdate::MonitorError {
-                    label: format!("systemd unit {unit_name}"),
-                    error: err.to_string(),
-                });
-            }
-        }));
-    }
-    monitor_handles
+    systemd_runtimes
+        .iter()
+        .enumerate()
+        .map(|(index, runtime)| {
+            runtime
+                .runtime
+                .spawn_monitor(runtime.unit_name.clone(), update_tx.clone(), index)
+        })
+        .collect()
 }
 
 #[cfg(test)]

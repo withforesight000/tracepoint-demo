@@ -1,13 +1,17 @@
 use bollard::Docker;
 
-pub fn connect_if_needed(containers: &[String]) -> anyhow::Result<Option<Docker>> {
+use crate::{gateway::docker, usecase::ports::SharedContainerRuntimePort};
+
+pub fn connect_if_needed(
+    containers: &[String],
+) -> anyhow::Result<Option<SharedContainerRuntimePort>> {
     if containers.is_empty() {
         return Ok(None);
     }
 
-    Docker::connect_with_local_defaults()
-        .map(Some)
-        .map_err(|err| anyhow::anyhow!("failed to connect to Docker: {err}"))
+    let docker = Docker::connect_with_local_defaults()
+        .map_err(|err| anyhow::anyhow!("failed to connect to Docker: {err}"))?;
+    Ok(Some(docker::runtime_port(docker)))
 }
 
 #[cfg(test)]

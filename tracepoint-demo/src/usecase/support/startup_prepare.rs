@@ -19,8 +19,8 @@ pub(crate) struct StartupPrepareInputs<'a> {
     pub all_container_processes: bool,
     pub all_systemd_processes: bool,
     pub watch_flags: u32,
-    pub docker_available: bool,
-    pub systemd_available: bool,
+    pub container_runtime_available: bool,
+    pub systemd_runtime_available: bool,
 }
 pub(crate) trait StartupPrepareBackend {
     type ContainerRuntime;
@@ -83,7 +83,7 @@ pub(crate) async fn prepare_runtime_plan<TBackend: StartupPrepareBackend>(
 
     let container_runtimes = match inputs.containers.is_empty() {
         true => Vec::new(),
-        false if inputs.docker_available => {
+        false if inputs.container_runtime_available => {
             backend
                 .initialize_container_runtimes(
                     inputs.containers,
@@ -92,12 +92,12 @@ pub(crate) async fn prepare_runtime_plan<TBackend: StartupPrepareBackend>(
                 )
                 .await?
         }
-        false => return Err(anyhow::anyhow!("Docker client is not initialized")),
+        false => return Err(anyhow::anyhow!("container runtime is not initialized")),
     };
 
     let systemd_runtimes = match inputs.systemd_units.is_empty() {
         true => Vec::new(),
-        false if inputs.systemd_available => {
+        false if inputs.systemd_runtime_available => {
             backend
                 .initialize_systemd_runtimes(
                     inputs.systemd_units,
@@ -106,7 +106,7 @@ pub(crate) async fn prepare_runtime_plan<TBackend: StartupPrepareBackend>(
                 )
                 .await?
         }
-        false => return Err(anyhow::anyhow!("systemd connection is not initialized")),
+        false => return Err(anyhow::anyhow!("systemd runtime is not initialized")),
     };
 
     let current_watch_roots =
@@ -220,7 +220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepare_runtime_plan_validates_docker_availability() {
+    async fn prepare_runtime_plan_validates_container_runtime_availability() {
         let mut backend = FakeStartupPrepareBackend::default();
 
         let err = prepare_runtime_plan(
@@ -235,19 +235,19 @@ mod tests {
                 all_container_processes: false,
                 all_systemd_processes: false,
                 watch_flags: 0x1,
-                docker_available: false,
-                systemd_available: true,
+                container_runtime_available: false,
+                systemd_runtime_available: true,
             },
         )
         .await
         .unwrap_err();
 
-        assert_eq!(err.to_string(), "Docker client is not initialized");
+        assert_eq!(err.to_string(), "container runtime is not initialized");
         assert_eq!(backend.container_init_calls, 0);
     }
 
     #[tokio::test]
-    async fn prepare_runtime_plan_validates_systemd_availability() {
+    async fn prepare_runtime_plan_validates_systemd_runtime_availability() {
         let mut backend = FakeStartupPrepareBackend::default();
 
         let err = prepare_runtime_plan(
@@ -262,14 +262,14 @@ mod tests {
                 all_container_processes: false,
                 all_systemd_processes: false,
                 watch_flags: 0x1,
-                docker_available: true,
-                systemd_available: false,
+                container_runtime_available: true,
+                systemd_runtime_available: false,
             },
         )
         .await
         .unwrap_err();
 
-        assert_eq!(err.to_string(), "systemd connection is not initialized");
+        assert_eq!(err.to_string(), "systemd runtime is not initialized");
         assert_eq!(backend.systemd_init_calls, 0);
     }
 
@@ -293,8 +293,8 @@ mod tests {
                 all_container_processes: false,
                 all_systemd_processes: false,
                 watch_flags: 0x1,
-                docker_available: false,
-                systemd_available: false,
+                container_runtime_available: false,
+                systemd_runtime_available: false,
             },
         )
         .await
@@ -332,8 +332,8 @@ mod tests {
                 all_container_processes: false,
                 all_systemd_processes: false,
                 watch_flags: 0x1,
-                docker_available: true,
-                systemd_available: true,
+                container_runtime_available: true,
+                systemd_runtime_available: true,
             },
         )
         .await

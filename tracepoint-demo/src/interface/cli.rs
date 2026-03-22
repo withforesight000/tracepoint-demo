@@ -1,5 +1,7 @@
 use clap::{ArgGroup, Parser};
 
+use crate::usecase::trace_selected_targets::TraceRequest;
+
 #[derive(Parser)]
 #[command(author, version, about = "Traces execve syscalls for a set of processes", long_about = None)]
 #[command(arg_required_else_help = true)]
@@ -59,12 +61,20 @@ pub struct CliArgs {
     pub no_watch_children: bool,
 }
 
-pub fn normalize_tty_name(tty: &str) -> String {
-    let name = tty.strip_prefix("/dev/").unwrap_or(tty);
-    if let Some(rest) = name.strip_prefix("pts/") {
-        format!("pts{rest}")
-    } else {
-        name.to_string()
+impl CliArgs {
+    pub fn into_request(self) -> TraceRequest {
+        let mut pids = self.pid;
+        pids.extend(self.positional_pids);
+
+        TraceRequest {
+            pids,
+            tty_inputs: self.tty,
+            containers: self.container,
+            all_container_processes: self.all_container_processes,
+            systemd_units: self.systemd_unit,
+            all_systemd_processes: self.all_systemd_processes,
+            watch_children: !self.no_watch_children,
+        }
     }
 }
 
@@ -73,14 +83,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_tty_name_drops_dev_prefix_and_pts_slash() {
-        assert_eq!(normalize_tty_name("/dev/pts/3"), "pts3");
-        assert_eq!(normalize_tty_name("/dev/tty1"), "tty1");
-    }
+    fn into_request_merges_pid_inputs_and_flips_watch_children_flag() {
+        let request = CliArgs {
+            pid: vec![10],
+            positional_pids: vec![20],
+            tty: vec!["/dev/pts/3".to_string()],
+            container: vec!["web".to_string()],
+            all_container_processes: true,
+            systemd_unit: vec!["sshd.service".to_string()],
+            all_systemd_processes: false,
+            no_watch_children: true,
+        }
+        .into_request();
 
-    #[test]
-    fn normalize_tty_name_handles_already_normalized() {
-        assert_eq!(normalize_tty_name("pts2"), "pts2");
-        assert_eq!(normalize_tty_name("tty0"), "tty0");
+        assert_eq!(request.pids, vec![10, 20]);
+        assert_eq!(request.tty_inputs, vec!["/dev/pts/3".to_string()]);
+        assert_eq!(request.containers, vec!["web".to_string()]);
+        assert!(request.all_container_processes);
+        assert_eq!(request.systemd_units, vec!["sshd.service".to_string()]);
+        assert!(!request.all_systemd_processes);
+        assert!(!request.watch_children);
     }
 }

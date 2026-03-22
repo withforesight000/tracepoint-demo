@@ -1,45 +1,53 @@
+use aya::Ebpf;
 use tokio::sync::mpsc;
 
-use aya::Ebpf;
-use bollard::Docker;
-
-use crate::{
-    interface::{cli::CliArgs, runtime_loop},
-    usecase::{
-        support::{runtime_update::RuntimeUpdate, startup::prepare},
-        watch_container, watch_systemd_unit,
+use crate::usecase::{
+    ports::{SharedContainerRuntimePort, SharedSystemdRuntimePort, StatusReporter, WaitPort},
+    support::{
+        runtime_update::RuntimeUpdate,
+        startup,
+        state::{AppState, PreparedApp},
     },
+    watch_container, watch_systemd_unit,
 };
+
+pub struct TraceRequest {
+    pub pids: Vec<u32>,
+    pub tty_inputs: Vec<String>,
+    pub containers: Vec<String>,
+    pub all_container_processes: bool,
+    pub systemd_units: Vec<String>,
+    pub all_systemd_processes: bool,
+    pub watch_children: bool,
+}
 
 pub struct StartupResources {
     pub ebpf: Ebpf,
-    pub docker: Option<Docker>,
-    pub systemd_conn: Option<zbus::Connection>,
+    pub container_runtime: Option<SharedContainerRuntimePort>,
+    pub systemd_runtime: Option<SharedSystemdRuntimePort>,
 }
 
-pub async fn run(args: CliArgs, resources: StartupResources) -> anyhow::Result<()> {
-    let mut prepared = prepare(args, resources).await?;
+pub async fn prepare<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized>(
+    request: TraceRequest,
+    resources: StartupResources,
+    reporter: &mut TReporter,
+    wait_port: &mut TWait,
+) -> anyhow::Result<PreparedApp> {
+    startup::prepare(request, resources, reporter, wait_port).await
+}
 
-    let (update_tx, mut update_rx) = mpsc::unbounded_channel::<RuntimeUpdate>();
+pub fn spawn_monitors(
+    state: &AppState,
+    update_tx: &mpsc::UnboundedSender<RuntimeUpdate>,
+) -> Vec<tokio::task::JoinHandle<()>> {
     let mut monitor_handles = Vec::new();
     monitor_handles.extend(watch_container::spawn_monitors(
-        &prepared.state.container_runtimes,
-        &update_tx,
+        &state.container_runtimes,
+        update_tx,
     ));
     monitor_handles.extend(watch_systemd_unit::spawn_monitors(
-        &prepared.state.systemd_runtimes,
-        &update_tx,
+        &state.systemd_runtimes,
+        update_tx,
     ));
-    drop(update_tx);
-
-    runtime_loop::run(
-        &mut prepared.ebpf,
-        &mut prepared.state,
-        &mut update_rx,
-        &prepared.tty_inputs,
-        prepared.watch_children,
-        &prepared.target_descriptions,
-        !monitor_handles.is_empty(),
-    )
-    .await
+    monitor_handles
 }

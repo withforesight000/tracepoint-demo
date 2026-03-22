@@ -6,7 +6,10 @@ use tokio::{io::unix::AsyncFd, select, signal, sync::mpsc};
 
 use crate::{
     gateway::ebpf::drain_exec_events,
-    interface::output::{print_shutdown_message, print_startup_notice},
+    interface::output::{
+        ConsoleStatusReporter, print_exec_event, print_invalid_exec_event_size,
+        print_shutdown_message, print_startup_notice,
+    },
     interface::runtime_updates::handle_runtime_update_with_state,
     usecase::support::{runtime_update::RuntimeUpdate, state::AppState},
 };
@@ -21,6 +24,8 @@ pub async fn run(
     target_descriptions: &[String],
     has_monitors: bool,
 ) -> anyhow::Result<()> {
+    let mut reporter = ConsoleStatusReporter;
+
     print_startup_notice(
         &state
             .current_watch_roots
@@ -46,12 +51,12 @@ pub async fn run(
             res = async_ring.readable_mut() => {
                 let mut guard = res?;
                 let ring = guard.get_inner_mut();
-                drain_exec_events(ring);
+                drain_exec_events(ring, |event| print_exec_event(&event), print_invalid_exec_event_size);
                 guard.clear_ready();
             }
 
             maybe_update = update_rx.recv() => {
-                if !handle_runtime_update_with_state(ebpf, state, maybe_update).await? {
+                if !handle_runtime_update_with_state(ebpf, state, maybe_update, &mut reporter).await? {
                     break;
                 }
             }
@@ -72,7 +77,7 @@ async fn run_plain_event_loop(async_ring: &mut AsyncFd<RingBuf<MapData>>) -> any
             res = async_ring.readable_mut() => {
                 let mut guard = res?;
                 let ring = guard.get_inner_mut();
-                drain_exec_events(ring);
+                drain_exec_events(ring, |event| print_exec_event(&event), print_invalid_exec_event_size);
                 guard.clear_ready();
             }
 

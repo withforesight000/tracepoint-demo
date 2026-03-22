@@ -9,6 +9,8 @@ activity for a configurable set of processes.
 - `tracepoint-demo-ebpf/` contains the kernel eBPF programs.
 - `tracepoint-demo-common/` contains the shared wire types and constants.
 - Architecture notes live in `doc/design.md`.
+- The userspace crate is split into `interface/`, `usecase/`, and `gateway/`; `doc/design.md`
+  explains the ownership of each layer.
 
 ## Requirements
 

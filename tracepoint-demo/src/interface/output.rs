@@ -1,3 +1,7 @@
+use tracepoint_demo_common::ExecEvent;
+
+use crate::{gateway::ebpf::cstr_from_u8, usecase::ports::StatusReporter};
+
 fn startup_notice_message(
     watched_root_pids: &[u32],
     tty_inputs: &[String],
@@ -45,6 +49,38 @@ fn shutdown_message() -> &'static str {
     "Exiting..."
 }
 
+fn exec_event_message(event: &ExecEvent) -> String {
+    format!(
+        "[{:.6}] pid={} tid={} uid={} gid={} syscall_id={} \
+         comm=\"{}\" filename=\"{}\" argv0=\"{}\"",
+        event.ktime_ns as f64 / 1e9,
+        event.pid,
+        event.tid,
+        event.uid,
+        event.gid,
+        event.syscall_id,
+        cstr_from_u8(&event.comm),
+        cstr_from_u8(&event.filename),
+        cstr_from_u8(&event.argv0),
+    )
+}
+
+fn invalid_exec_event_size_message(actual: usize, expected: usize) -> String {
+    format!("unexpected ExecEvent size: {actual} (expected {expected})")
+}
+
+pub struct ConsoleStatusReporter;
+
+impl StatusReporter for ConsoleStatusReporter {
+    fn info(&mut self, message: String) {
+        println!("{message}");
+    }
+
+    fn warn(&mut self, message: String) {
+        eprintln!("{message}");
+    }
+}
+
 pub fn print_startup_notice(
     watched_root_pids: &[u32],
     tty_inputs: &[String],
@@ -64,6 +100,14 @@ pub fn print_startup_notice(
 
 pub fn print_shutdown_message() {
     println!("{}", shutdown_message());
+}
+
+pub fn print_exec_event(event: &ExecEvent) {
+    println!("{}", exec_event_message(event));
+}
+
+pub fn print_invalid_exec_event_size(actual: usize, expected: usize) {
+    eprintln!("{}", invalid_exec_event_size_message(actual, expected));
 }
 
 #[cfg(test)]
@@ -134,6 +178,35 @@ mod tests {
     }
 
     #[test]
+    fn exec_event_message_formats_fields() {
+        let event = ExecEvent {
+            ktime_ns: 123_000_000,
+            pid: 10,
+            tid: 10,
+            uid: 1000,
+            gid: 1000,
+            syscall_id: 59,
+            comm: [0; tracepoint_demo_common::EXEC_EVENT_COMM_SIZE],
+            filename: [0; tracepoint_demo_common::EXEC_EVENT_FILENAME_SIZE],
+            argv0: [0; tracepoint_demo_common::EXEC_EVENT_ARGV0_SIZE],
+        };
+
+        let message = exec_event_message(&event);
+
+        assert!(message.contains("[0.123000]"));
+        assert!(message.contains("pid=10"));
+        assert!(message.contains("syscall_id=59"));
+    }
+
+    #[test]
+    fn invalid_exec_event_size_message_is_descriptive() {
+        assert_eq!(
+            invalid_exec_event_size_message(12, 300),
+            "unexpected ExecEvent size: 12 (expected 300)"
+        );
+    }
+
+    #[test]
     fn print_functions_delegate_to_message_helpers() {
         print_startup_notice(
             &[7],
@@ -142,5 +215,17 @@ mod tests {
             &["containers=[api]".to_string()],
         );
         print_shutdown_message();
+        print_exec_event(&ExecEvent {
+            ktime_ns: 0,
+            pid: 1,
+            tid: 1,
+            uid: 0,
+            gid: 0,
+            syscall_id: 59,
+            comm: [0; tracepoint_demo_common::EXEC_EVENT_COMM_SIZE],
+            filename: [0; tracepoint_demo_common::EXEC_EVENT_FILENAME_SIZE],
+            argv0: [0; tracepoint_demo_common::EXEC_EVENT_ARGV0_SIZE],
+        });
+        print_invalid_exec_event_size(12, 300);
     }
 }

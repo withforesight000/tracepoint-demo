@@ -16,7 +16,7 @@ use tracepoint_demo_common::{
     EXEC_EVENTS_MAP, ExecEvent, PROC_FLAG_WATCH_CHILDREN, PROC_STATE_MAP, TaskRel, WATCH_PIDS_MAP,
 };
 
-use crate::interface::cli::normalize_tty_name;
+use crate::usecase::support::tty::normalize_tty_name;
 
 pub fn cstr_from_u8(bytes: &[u8]) -> String {
     let len = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
@@ -40,33 +40,25 @@ mod tests {
     }
 }
 
-pub fn drain_exec_events(ring: &mut RingBuf<MapData>) {
+pub fn drain_exec_events<TEvent, TInvalid>(
+    ring: &mut RingBuf<MapData>,
+    mut on_event: TEvent,
+    mut on_invalid_size: TInvalid,
+) where
+    TEvent: FnMut(ExecEvent),
+    TInvalid: FnMut(usize, usize),
+{
+    let expected_size = mem::size_of::<ExecEvent>();
+
     while let Some(item) = ring.next() {
         let bytes = &item;
-        if bytes.len() != mem::size_of::<ExecEvent>() {
-            eprintln!(
-                "unexpected ExecEvent size: {} (expected {})",
-                bytes.len(),
-                mem::size_of::<ExecEvent>()
-            );
+        if bytes.len() != expected_size {
+            on_invalid_size(bytes.len(), expected_size);
             continue;
         }
 
         let event: ExecEvent = unsafe { *(bytes.as_ptr() as *const ExecEvent) };
-
-        println!(
-            "[{:.6}] pid={} tid={} uid={} gid={} syscall_id={} \
-             comm=\"{}\" filename=\"{}\" argv0=\"{}\"",
-            event.ktime_ns as f64 / 1e9,
-            event.pid,
-            event.tid,
-            event.uid,
-            event.gid,
-            event.syscall_id,
-            cstr_from_u8(&event.comm),
-            cstr_from_u8(&event.filename),
-            cstr_from_u8(&event.argv0),
-        );
+        on_event(event);
     }
 }
 

@@ -1,39 +1,40 @@
 use std::collections::{HashMap as StdHashMap, HashSet};
 
 use aya::Ebpf;
-use bollard::Docker;
-use zbus_systemd::systemd1::ManagerProxy;
 
 use tracepoint_demo_common::{PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF};
 
 use crate::{
-    gateway::{
-        docker::query_container_main_pid,
-        ebpf::{build_watch_pids, seed_proc_state_from_task_iter},
-        systemd::{SystemdUnitLookupError, query_systemd_unit_status, resolve_systemd_unit},
-    },
-    interface::cli::{CliArgs, normalize_tty_name},
+    gateway::ebpf::{build_watch_pids, seed_proc_state_from_task_iter},
     usecase::{
-        trace_selected_targets::StartupResources,
+        ports::{SharedContainerRuntimePort, SharedSystemdRuntimePort, StatusReporter, WaitPort},
+        trace_selected_targets::{StartupResources, TraceRequest},
         watch_container::{ContainerRuntime, seed_container_processes},
         watch_pid_or_tty::wait_pid_or_tty_targets,
-        watch_systemd_unit::{SystemdRuntime, seed_systemd_unit_processes},
+        watch_systemd_unit::{
+            SystemdRuntime, SystemdSeedSpec, seed_systemd_unit_processes, wait_systemd_unit_running,
+        },
     },
 };
 
 use super::{
     startup_prepare::{StartupPrepareBackend, StartupPrepareInputs, prepare_runtime_plan},
     state::{AppState, PreparedApp},
+    tty::normalize_tty_name,
     watch_roots::add_watch_root,
 };
 
-struct StartupPrepareAdapter<'a> {
+struct StartupPrepareAdapter<'a, TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> {
     ebpf: &'a mut Ebpf,
-    docker: Option<&'a Docker>,
-    systemd_conn: Option<&'a zbus::Connection>,
+    container_runtime: Option<&'a SharedContainerRuntimePort>,
+    systemd_runtime: Option<&'a SharedSystemdRuntimePort>,
+    reporter: &'a mut TReporter,
+    wait_port: &'a mut TWait,
 }
 
-impl StartupPrepareBackend for StartupPrepareAdapter<'_> {
+impl<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> StartupPrepareBackend
+    for StartupPrepareAdapter<'_, TReporter, TWait>
+{
     type ContainerRuntime = ContainerRuntime;
     type SystemdRuntime = SystemdRuntime;
 
@@ -57,9 +58,16 @@ impl StartupPrepareBackend for StartupPrepareAdapter<'_> {
         }
 
         if static_watch_roots.is_empty() && !has_runtime_targets {
-            let roots =
-                wait_pid_or_tty_targets(self.ebpf, pids, tty_filters, tty_inputs, watch_flags)
-                    .await?;
+            let roots = wait_pid_or_tty_targets(
+                self.ebpf,
+                pids,
+                tty_filters,
+                tty_inputs,
+                watch_flags,
+                &mut *self.reporter,
+                &mut *self.wait_port,
+            )
+            .await?;
             for pid in roots {
                 add_watch_root(&mut static_watch_roots, pid, watch_flags);
             }
@@ -76,8 +84,9 @@ impl StartupPrepareBackend for StartupPrepareAdapter<'_> {
     ) -> anyhow::Result<Vec<Self::ContainerRuntime>> {
         initialize_container_runtimes(
             self.ebpf,
-            self.docker
-                .expect("docker should be available when container initialization runs"),
+            &mut *self.reporter,
+            self.container_runtime
+                .expect("container runtime should be available when initialization runs"),
             containers,
             watch_children,
             all_container_processes,
@@ -93,8 +102,10 @@ impl StartupPrepareBackend for StartupPrepareAdapter<'_> {
     ) -> anyhow::Result<Vec<Self::SystemdRuntime>> {
         initialize_systemd_runtimes(
             self.ebpf,
-            self.systemd_conn
-                .expect("systemd connection should be available when initialization runs"),
+            &mut *self.reporter,
+            &mut *self.wait_port,
+            self.systemd_runtime
+                .expect("systemd runtime should be available when initialization runs"),
             systemd_units,
             watch_children,
             all_systemd_processes,
@@ -165,19 +176,20 @@ fn collect_target_descriptions(
     target_descriptions
 }
 
-async fn initialize_container_runtimes(
+async fn initialize_container_runtimes<TReporter: StatusReporter + ?Sized>(
     ebpf: &mut Ebpf,
-    docker: &Docker,
-    container: &[String],
+    reporter: &mut TReporter,
+    runtime: &SharedContainerRuntimePort,
+    containers: &[String],
     watch_children: bool,
     all_container_processes: bool,
 ) -> anyhow::Result<Vec<ContainerRuntime>> {
     let mut container_runtimes = Vec::new();
-    if container.is_empty() {
+    if containers.is_empty() {
         return Ok(container_runtimes);
     }
 
-    for container_name in container {
+    for container_name in containers {
         let container_watch_children = if all_container_processes {
             true
         } else {
@@ -190,10 +202,11 @@ async fn initialize_container_runtimes(
                 0
             };
 
-        let current_pid = query_container_main_pid(docker, container_name).await?;
+        let current_pid = runtime.query_main_pid(container_name).await?;
         if let Some(main_pid) = current_pid {
             seed_container_processes(
                 ebpf,
+                reporter,
                 container_name,
                 main_pid,
                 container_flags,
@@ -204,7 +217,7 @@ async fn initialize_container_runtimes(
         }
 
         container_runtimes.push(ContainerRuntime {
-            docker: docker.clone(),
+            runtime: runtime.clone(),
             name_or_id: container_name.clone(),
             watch_children: container_watch_children,
             all_processes: all_container_processes,
@@ -216,23 +229,24 @@ async fn initialize_container_runtimes(
     Ok(container_runtimes)
 }
 
-async fn initialize_systemd_runtimes(
+async fn initialize_systemd_runtimes<
+    TReporter: StatusReporter + ?Sized,
+    TWait: WaitPort + ?Sized,
+>(
     ebpf: &mut Ebpf,
-    conn: &zbus::Connection,
-    systemd_unit: &[String],
+    reporter: &mut TReporter,
+    wait_port: &mut TWait,
+    runtime: &SharedSystemdRuntimePort,
+    systemd_units: &[String],
     watch_children: bool,
     all_systemd_processes: bool,
 ) -> anyhow::Result<Vec<SystemdRuntime>> {
     let mut systemd_runtimes = Vec::new();
-    if systemd_unit.is_empty() {
+    if systemd_units.is_empty() {
         return Ok(systemd_runtimes);
     }
 
-    let manager = ManagerProxy::new(conn)
-        .await
-        .map_err(|err| anyhow::anyhow!("failed to create systemd manager proxy: {err}"))?;
-
-    for unit_name in systemd_unit {
+    for unit_name in systemd_units {
         let unit_watch_children = if all_systemd_processes {
             true
         } else {
@@ -245,57 +259,37 @@ async fn initialize_systemd_runtimes(
                 0
             };
 
-        let (current_pid, current_running) =
-            match resolve_systemd_unit(conn, &manager, unit_name).await {
-                Ok(resolved_unit) => {
-                    let status = query_systemd_unit_status(
-                        &resolved_unit.unit_proxy,
-                        &resolved_unit.service_proxy,
-                    )
-                    .await
-                    .map_err(|err| match err {
-                        SystemdUnitLookupError::NotFound => {
-                            anyhow::anyhow!("systemd unit {unit_name} disappeared during startup")
-                        }
-                        SystemdUnitLookupError::Other(err) => err,
-                    })?;
+        let status = runtime.current_status(unit_name).await?;
+        let status = if status.exists && !status.is_running() {
+            wait_systemd_unit_running(runtime.as_ref(), reporter, wait_port, unit_name).await?
+        } else {
+            status
+        };
 
-                    let status = if status.is_running() {
-                        status
-                    } else {
-                        let (_, status) =
-                            crate::usecase::watch_systemd_unit::wait_systemd_unit_running(
-                                conn, unit_name,
-                            )
-                            .await?;
-                        status
-                    };
-
-                    let current_running = status.is_running();
-                    seed_systemd_unit_processes(
-                        ebpf,
-                        conn,
-                        unit_name,
-                        status.main_pid,
-                        unit_flags,
-                        unit_watch_children,
-                        all_systemd_processes,
-                    )
-                    .await?;
-
-                    (status.main_pid, current_running)
-                }
-                Err(SystemdUnitLookupError::NotFound) => (None, false),
-                Err(SystemdUnitLookupError::Other(err)) => return Err(err),
-            };
+        let current_running = status.is_running();
+        if current_running {
+            seed_systemd_unit_processes(
+                ebpf,
+                reporter,
+                runtime.as_ref(),
+                SystemdSeedSpec {
+                    unit_name,
+                    main_pid: status.main_pid,
+                    flags: unit_flags,
+                    watch_children: unit_watch_children,
+                    all_processes: all_systemd_processes,
+                },
+            )
+            .await?;
+        }
 
         systemd_runtimes.push(SystemdRuntime {
-            conn: conn.clone(),
+            runtime: runtime.clone(),
             unit_name: unit_name.clone(),
             watch_children: unit_watch_children,
             all_processes: all_systemd_processes,
             flags: unit_flags,
-            current_pid,
+            current_pid: status.main_pid,
             current_running,
         });
     }
@@ -303,20 +297,21 @@ async fn initialize_systemd_runtimes(
     Ok(systemd_runtimes)
 }
 
-pub async fn prepare(args: CliArgs, resources: StartupResources) -> anyhow::Result<PreparedApp> {
-    let CliArgs {
-        pid,
-        positional_pids,
-        tty: tty_inputs,
-        container,
+pub async fn prepare<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized>(
+    request: TraceRequest,
+    resources: StartupResources,
+    reporter: &mut TReporter,
+    wait_port: &mut TWait,
+) -> anyhow::Result<PreparedApp> {
+    let TraceRequest {
+        pids,
+        tty_inputs,
+        containers,
         all_container_processes,
-        systemd_unit,
+        systemd_units,
         all_systemd_processes,
-        no_watch_children,
-    } = args;
-
-    let mut pids = pid;
-    pids.extend(positional_pids);
+        watch_children,
+    } = request;
 
     let mut tty_filters = HashSet::new();
     for tty in &tty_inputs {
@@ -326,16 +321,14 @@ pub async fn prepare(args: CliArgs, resources: StartupResources) -> anyhow::Resu
         }
     }
 
-    let watch_children = !no_watch_children;
-
     let StartupResources {
         ebpf,
-        docker,
-        systemd_conn,
+        container_runtime,
+        systemd_runtime,
     } = resources;
     let mut ebpf = ebpf;
-    let docker_available = docker.is_some();
-    let systemd_available = systemd_conn.is_some();
+    let container_runtime_available = container_runtime.is_some();
+    let systemd_runtime_available = systemd_runtime.is_some();
 
     let watch_flags = PROC_FLAG_WATCH_SELF
         | if watch_children {
@@ -345,8 +338,10 @@ pub async fn prepare(args: CliArgs, resources: StartupResources) -> anyhow::Resu
         };
     let mut prepare_adapter = StartupPrepareAdapter {
         ebpf: &mut ebpf,
-        docker: docker.as_ref(),
-        systemd_conn: systemd_conn.as_ref(),
+        container_runtime: container_runtime.as_ref(),
+        systemd_runtime: systemd_runtime.as_ref(),
+        reporter,
+        wait_port,
     };
     let plan = prepare_runtime_plan(
         &mut prepare_adapter,
@@ -354,14 +349,14 @@ pub async fn prepare(args: CliArgs, resources: StartupResources) -> anyhow::Resu
             pids: &pids,
             tty_inputs: &tty_inputs,
             tty_filters: &tty_filters,
-            containers: &container,
-            systemd_units: &systemd_unit,
+            containers: &containers,
+            systemd_units: &systemd_units,
             watch_children,
             all_container_processes,
             all_systemd_processes,
             watch_flags,
-            docker_available,
-            systemd_available,
+            container_runtime_available,
+            systemd_runtime_available,
         },
     )
     .await?;
@@ -387,8 +382,57 @@ pub async fn prepare(args: CliArgs, resources: StartupResources) -> anyhow::Resu
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use bollard::Docker;
+    use crate::usecase::{
+        ports::{BoxFuture, ContainerRuntimePort, SystemdRuntimePort, SystemdUnitRuntimeStatus},
+        support::runtime_update::RuntimeUpdate,
+    };
+
+    struct FakeContainerRuntimePort;
+
+    impl ContainerRuntimePort for FakeContainerRuntimePort {
+        fn query_main_pid<'a>(
+            &'a self,
+            _name_or_id: &'a str,
+        ) -> BoxFuture<'a, anyhow::Result<Option<u32>>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn spawn_monitor(
+            &self,
+            _name_or_id: String,
+            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
+            _index: usize,
+        ) -> tokio::task::JoinHandle<()> {
+            tokio::spawn(async {})
+        }
+    }
+
+    struct FakeSystemdRuntimePort;
+
+    impl SystemdRuntimePort for FakeSystemdRuntimePort {
+        fn current_status<'a>(
+            &'a self,
+            _unit_name: &'a str,
+        ) -> BoxFuture<'a, anyhow::Result<SystemdUnitRuntimeStatus>> {
+            Box::pin(async { Ok(SystemdUnitRuntimeStatus::missing()) })
+        }
+
+        fn unit_pids<'a>(&'a self, _unit_name: &'a str) -> BoxFuture<'a, anyhow::Result<Vec<u32>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn spawn_monitor(
+            &self,
+            _unit_name: String,
+            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
+            _index: usize,
+        ) -> tokio::task::JoinHandle<()> {
+            tokio::spawn(async {})
+        }
+    }
 
     #[test]
     fn collect_target_descriptions_empty_when_no_runtimes() {
@@ -396,34 +440,28 @@ mod tests {
         assert!(desc.is_empty());
     }
 
-    #[tokio::test]
-    async fn collect_target_descriptions_includes_container_and_systemd_entries() {
+    #[test]
+    fn collect_target_descriptions_includes_container_and_systemd_entries() {
         let container = ContainerRuntime {
-            docker: Docker::connect_with_local_defaults().unwrap(),
+            runtime: Arc::new(FakeContainerRuntimePort),
             name_or_id: "ctr".to_string(),
             watch_children: false,
             all_processes: false,
             flags: 1,
             current_pid: Some(1),
         };
+        let systemd_runtime = SystemdRuntime {
+            runtime: Arc::new(FakeSystemdRuntimePort),
+            unit_name: "svc".to_string(),
+            watch_children: false,
+            all_processes: false,
+            flags: 2,
+            current_pid: Some(2),
+            current_running: true,
+        };
 
-        let mut systemd_runtimes = Vec::new();
-        if let Ok(conn) = zbus::Connection::system().await {
-            systemd_runtimes.push(SystemdRuntime {
-                conn,
-                unit_name: "svc".to_string(),
-                watch_children: false,
-                all_processes: false,
-                flags: 2,
-                current_pid: Some(2),
-                current_running: true,
-            });
-        }
-
-        let desc = collect_target_descriptions(&[container], &systemd_runtimes, false, false);
+        let desc = collect_target_descriptions(&[container], &[systemd_runtime], false, false);
         assert!(desc.iter().any(|s| s.contains("containers")));
-        if !systemd_runtimes.is_empty() {
-            assert!(desc.iter().any(|s| s.contains("systemd-units")));
-        }
+        assert!(desc.iter().any(|s| s.contains("systemd-units")));
     }
 }

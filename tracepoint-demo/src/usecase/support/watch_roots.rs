@@ -101,8 +101,57 @@ pub fn sync_watch_pids(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use bollard::Docker;
+    use crate::usecase::{
+        ports::{BoxFuture, ContainerRuntimePort, SystemdRuntimePort, SystemdUnitRuntimeStatus},
+        support::runtime_update::RuntimeUpdate,
+    };
+
+    struct FakeContainerRuntimePort;
+
+    impl ContainerRuntimePort for FakeContainerRuntimePort {
+        fn query_main_pid<'a>(
+            &'a self,
+            _name_or_id: &'a str,
+        ) -> BoxFuture<'a, anyhow::Result<Option<u32>>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn spawn_monitor(
+            &self,
+            _name_or_id: String,
+            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
+            _index: usize,
+        ) -> tokio::task::JoinHandle<()> {
+            tokio::spawn(async {})
+        }
+    }
+
+    struct FakeSystemdRuntimePort;
+
+    impl SystemdRuntimePort for FakeSystemdRuntimePort {
+        fn current_status<'a>(
+            &'a self,
+            _unit_name: &'a str,
+        ) -> BoxFuture<'a, anyhow::Result<SystemdUnitRuntimeStatus>> {
+            Box::pin(async { Ok(SystemdUnitRuntimeStatus::missing()) })
+        }
+
+        fn unit_pids<'a>(&'a self, _unit_name: &'a str) -> BoxFuture<'a, anyhow::Result<Vec<u32>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn spawn_monitor(
+            &self,
+            _unit_name: String,
+            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
+            _index: usize,
+        ) -> tokio::task::JoinHandle<()> {
+            tokio::spawn(async {})
+        }
+    }
 
     #[test]
     fn add_watch_root_sets_and_merges_flags() {
@@ -138,7 +187,7 @@ mod tests {
 
         let container_runtimes = vec![
             crate::usecase::watch_container::ContainerRuntime {
-                docker: Docker::connect_with_local_defaults().unwrap(),
+                runtime: Arc::new(FakeContainerRuntimePort),
                 name_or_id: "web".to_string(),
                 watch_children: true,
                 all_processes: false,
@@ -146,7 +195,7 @@ mod tests {
                 current_pid: Some(10),
             },
             crate::usecase::watch_container::ContainerRuntime {
-                docker: Docker::connect_with_local_defaults().unwrap(),
+                runtime: Arc::new(FakeContainerRuntimePort),
                 name_or_id: "worker".to_string(),
                 watch_children: false,
                 all_processes: false,
@@ -155,7 +204,17 @@ mod tests {
             },
         ];
 
-        let result = collect_watch_roots(&static_roots, &container_runtimes, &[]);
+        let systemd_runtimes = vec![crate::usecase::watch_systemd_unit::SystemdRuntime {
+            runtime: Arc::new(FakeSystemdRuntimePort),
+            unit_name: "sshd.service".to_string(),
+            watch_children: false,
+            all_processes: false,
+            flags: 0x8,
+            current_pid: None,
+            current_running: false,
+        }];
+
+        let result = collect_watch_roots(&static_roots, &container_runtimes, &systemd_runtimes);
 
         assert_eq!(result, StdHashMap::from([(10, 0x3), (30, 0x4)]));
     }

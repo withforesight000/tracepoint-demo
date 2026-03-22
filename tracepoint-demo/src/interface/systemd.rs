@@ -1,14 +1,16 @@
+use crate::{gateway::systemd, usecase::ports::SharedSystemdRuntimePort};
+
 pub async fn connect_if_needed(
     systemd_units: &[String],
-) -> anyhow::Result<Option<zbus::Connection>> {
+) -> anyhow::Result<Option<SharedSystemdRuntimePort>> {
     if systemd_units.is_empty() {
         return Ok(None);
     }
 
-    zbus::Connection::system()
+    let conn = zbus::Connection::system()
         .await
-        .map(Some)
-        .map_err(|err| anyhow::anyhow!("failed to connect to system bus: {err}"))
+        .map_err(|err| anyhow::anyhow!("failed to connect to system bus: {err}"))?;
+    Ok(Some(systemd::runtime_port(conn)))
 }
 
 #[cfg(test)]
