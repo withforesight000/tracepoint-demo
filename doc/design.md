@@ -29,6 +29,13 @@ The workspace is split across three crates:
 If you only want to understand the userspace architecture, start with `tracepoint-demo/` and come
 back to the eBPF crate later.
 
+## Build toolchain note
+
+The workspace build path currently compiles the embedded eBPF crate from `tracepoint-demo/build.rs`
+via `aya-build`. That helper defaults to the nightly toolchain for the eBPF build step, so the
+current CI and local build instructions need a nightly toolchain with `rust-src` installed
+alongside stable. A preinstalled `bpfel-unknown-none` rustup target is not required.
+
 ## Current directory layout
 
 Today, the userspace crate has this directory structure:

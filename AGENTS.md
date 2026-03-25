@@ -57,6 +57,16 @@ cargo fmt --check
 cargo test
 ```
 
+For local or CI builds of `tracepoint-demo`, install nightly with `rust-src` for the embedded
+eBPF build step:
+
+```bash
+rustup toolchain install nightly --profile minimal --component rust-src
+```
+
+Do not add `--target bpfel-unknown-none`; `tracepoint-demo/build.rs` builds that target from
+source via `aya-build` and `build-std`.
+
 ## Tests and coverage (recommended)
 
 Unit tests and lints:

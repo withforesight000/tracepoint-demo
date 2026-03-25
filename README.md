@@ -15,6 +15,7 @@ activity for a configurable set of processes.
 ## Requirements
 
 - Stable Rust toolchain: `rustup toolchain install stable`
+- Nightly Rust toolchain for the embedded eBPF build: `rustup toolchain install nightly --profile minimal --component rust-src`
 - BPF linker: `cargo install bpf-linker`
 - `aya-tool` for BTF generation: `cargo install aya-tool`
 - Root privileges or capabilities such as `CAP_BPF`, `CAP_PERFMON`, and `CAP_SYS_RESOURCE`
@@ -23,6 +24,11 @@ activity for a configurable set of processes.
 
 `tracepoint-demo/build.rs` uses `aya-build` to compile the embedded eBPF crate before the userspace
 binary. The final binary includes the BPF object.
+
+That build path currently runs the eBPF crate through the nightly toolchain because `aya-build`
+defaults to nightly for `build-std`-based eBPF compilation. Local builds and CI therefore need the
+nightly toolchain with `rust-src` installed in addition to stable. A separate
+`bpfel-unknown-none` rustup target is not required.
 
 ```bash
 cargo build --release
