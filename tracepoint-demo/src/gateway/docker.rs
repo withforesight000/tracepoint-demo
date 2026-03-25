@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
 use bollard::{
     Docker,
@@ -7,7 +7,7 @@ use bollard::{
     query_parameters::EventsOptions,
 };
 use futures_util::{StreamExt, stream::BoxStream};
-use tokio::{select, sync::mpsc, time::sleep};
+use tokio::{select, sync::{Mutex, mpsc}, time::sleep};
 
 use crate::usecase::port::{
     BoxFuture, ContainerRuntimePort, RuntimeUpdate, SharedContainerRuntimePort,
@@ -70,7 +70,7 @@ async fn monitor_container_runtime(
     let mut filters = HashMap::new();
     filters.insert("container".to_string(), vec![name_or_id.clone()]);
     filters.insert("type".to_string(), vec!["container".to_string()]);
-    let mut events: BoxStream<'static, Result<EventMessage, bollard::errors::Error>> = docker
+    let events: BoxStream<'static, Result<EventMessage, bollard::errors::Error>> = docker
         .events(Some(EventsOptions {
             since: None,
             until: None,
@@ -78,27 +78,70 @@ async fn monitor_container_runtime(
         }))
         .boxed();
     let poll_interval = Duration::from_secs(1);
-    let mut current_pid = query_container_main_pid(&query_docker, &name_or_id).await?;
+    let events = Arc::new(Mutex::new(events));
+    monitor_container_runtime_with(
+        &tx,
+        index,
+        {
+            let events = events.clone();
+            let name_or_id = name_or_id.clone();
+            move || {
+                let events = events.clone();
+                let name_or_id = name_or_id.clone();
+                async move {
+                    select! {
+                        maybe_event = async {
+                            let mut events = events.lock().await;
+                            events.next().await
+                        } => {
+                            match maybe_event {
+                                Some(Ok(_)) => Ok(()),
+                                Some(Err(err)) => Err(err.into()),
+                                None => Err(anyhow::anyhow!(
+                                    "Docker event stream ended while monitoring container {name_or_id}."
+                                )),
+                            }
+                        }
+                        _ = sleep(poll_interval) => Ok(()),
+                    }
+                }
+            }
+        },
+        {
+            let query_docker = query_docker.clone();
+            let name_or_id = name_or_id.clone();
+            move || {
+                let query_docker = query_docker.clone();
+                let name_or_id = name_or_id.clone();
+                async move { query_container_main_pid(&query_docker, &name_or_id).await }
+            }
+        },
+    )
+    .await
+}
+
+async fn monitor_container_runtime_with<TWait, TWaitFuture, TQuery, TQueryFuture>(
+    tx: &mpsc::UnboundedSender<RuntimeUpdate>,
+    index: usize,
+    mut wait_for_signal: TWait,
+    mut query_main_pid: TQuery,
+) -> anyhow::Result<()>
+where
+    TWait: FnMut() -> TWaitFuture,
+    TWaitFuture: Future<Output = anyhow::Result<()>>,
+    TQuery: FnMut() -> TQueryFuture,
+    TQueryFuture: Future<Output = anyhow::Result<Option<u32>>>,
+{
+    let mut current_pid = query_main_pid().await?;
     let _ = tx.send(RuntimeUpdate::ContainerPid {
         index,
         pid: current_pid,
     });
 
     loop {
-        select! {
-            maybe_event = events.next() => {
-                match maybe_event {
-                    Some(Ok(_)) => {}
-                    Some(Err(err)) => return Err(err.into()),
-                    None => return Err(anyhow::anyhow!(
-                        "Docker event stream ended while monitoring container {name_or_id}."
-                    )),
-                }
-            }
-            _ = sleep(poll_interval) => {}
-        }
+        wait_for_signal().await?;
 
-        let next_pid = query_container_main_pid(&query_docker, &name_or_id).await?;
+        let next_pid = query_main_pid().await?;
         if next_pid != current_pid {
             current_pid = next_pid;
             let _ = tx.send(RuntimeUpdate::ContainerPid {
@@ -143,7 +186,19 @@ pub fn runtime_port(docker: Docker) -> SharedContainerRuntimePort {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::VecDeque, sync::{Arc, Mutex}};
+
     use super::*;
+
+    fn drain_updates(
+        mut rx: mpsc::UnboundedReceiver<RuntimeUpdate>,
+    ) -> Vec<RuntimeUpdate> {
+        let mut updates = Vec::new();
+        while let Ok(update) = rx.try_recv() {
+            updates.push(update);
+        }
+        updates
+    }
 
     fn state(running: Option<bool>, pid: Option<i64>) -> ContainerState {
         ContainerState {
@@ -158,6 +213,18 @@ mod tests {
         let inspect = ContainerInspectResponse::default();
 
         assert_eq!(main_pid_from_inspect(&inspect, "demo").unwrap(), None);
+    }
+
+    #[test]
+    fn main_pid_from_inspect_propagates_invalid_running_pid() {
+        let inspect = ContainerInspectResponse {
+            state: Some(state(Some(true), Some(0))),
+            ..Default::default()
+        };
+
+        let err = main_pid_from_inspect(&inspect, "demo").unwrap_err();
+
+        assert_eq!(err.to_string(), "Container demo returned invalid PID.");
     }
 
     #[test]
@@ -194,5 +261,91 @@ mod tests {
         if let Ok(docker) = Docker::connect_with_local_defaults() {
             let _runtime = runtime_port(docker);
         }
+    }
+
+    #[tokio::test]
+    async fn monitor_container_runtime_with_sends_initial_and_changed_pids() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let signals: Arc<Mutex<VecDeque<anyhow::Result<()>>>> = Arc::new(Mutex::new(VecDeque::from([
+            Ok(()),
+            Ok(()),
+            Err(anyhow::anyhow!("stop")),
+        ])));
+        let pids: Arc<Mutex<VecDeque<anyhow::Result<Option<u32>>>>> = Arc::new(Mutex::new(VecDeque::from([
+            Ok(Some(10)),
+            Ok(Some(10)),
+            Ok(Some(20)),
+        ])));
+
+        let err = monitor_container_runtime_with(
+            &tx,
+            3,
+            {
+                let signals = signals.clone();
+                move || {
+                    let signals = signals.clone();
+                    async move {
+                        signals.lock().unwrap().pop_front().unwrap()
+                    }
+                }
+            },
+            {
+                let pids = pids.clone();
+                move || {
+                    let pids = pids.clone();
+                    async move {
+                        pids.lock().unwrap().pop_front().unwrap()
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "stop");
+        let updates = drain_updates(rx);
+        assert_eq!(updates.len(), 2);
+        assert!(matches!(updates[0], RuntimeUpdate::ContainerPid { index: 3, pid: Some(10) }));
+        assert!(matches!(updates[1], RuntimeUpdate::ContainerPid { index: 3, pid: Some(20) }));
+    }
+
+    #[tokio::test]
+    async fn monitor_container_runtime_with_propagates_query_errors_after_initial_send() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let signals: Arc<Mutex<VecDeque<anyhow::Result<()>>>> = Arc::new(Mutex::new(VecDeque::from([Ok(())])));
+        let pids: Arc<Mutex<VecDeque<anyhow::Result<Option<u32>>>>> = Arc::new(Mutex::new(VecDeque::from([
+            Ok(Some(10)),
+            Err(anyhow::anyhow!("inspect failed")),
+        ])));
+
+        let err = monitor_container_runtime_with(
+            &tx,
+            1,
+            {
+                let signals = signals.clone();
+                move || {
+                    let signals = signals.clone();
+                    async move {
+                        signals.lock().unwrap().pop_front().unwrap()
+                    }
+                }
+            },
+            {
+                let pids = pids.clone();
+                move || {
+                    let pids = pids.clone();
+                    async move {
+                        pids.lock().unwrap().pop_front().unwrap()
+                    }
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "inspect failed");
+        let updates = drain_updates(rx);
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(updates[0], RuntimeUpdate::ContainerPid { index: 1, pid: Some(10) }));
     }
 }

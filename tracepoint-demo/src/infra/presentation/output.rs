@@ -228,4 +228,12 @@ mod tests {
         });
         print_invalid_exec_event_size(12, 300);
     }
+
+    #[test]
+    fn console_status_reporter_accepts_info_and_warn_messages() {
+        let mut reporter = ConsoleStatusReporter;
+
+        reporter.info("hello info".to_string());
+        reporter.warn("hello warn".to_string());
+    }
 }

@@ -190,6 +190,7 @@ mod tests {
 
         let container_runtimes = vec![
             ContainerRuntime {
+                cgroup_port: Arc::new(crate::gateway::procfs::ProcfsCgroupPort),
                 runtime: Arc::new(FakeContainerRuntimePort),
                 name_or_id: "web".to_string(),
                 watch_children: true,
@@ -198,6 +199,7 @@ mod tests {
                 current_pid: Some(10),
             },
             ContainerRuntime {
+                cgroup_port: Arc::new(crate::gateway::procfs::ProcfsCgroupPort),
                 runtime: Arc::new(FakeContainerRuntimePort),
                 name_or_id: "worker".to_string(),
                 watch_children: false,

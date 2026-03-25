@@ -62,6 +62,7 @@ tracepoint-demo/src/
     ├── orchestration/
     │   ├── mod.rs
     │   ├── startup_prepare.rs
+    │   ├── startup_runtime.rs
     │   ├── state.rs
     │   ├── tty.rs
     │   └── watch_roots.rs
@@ -72,8 +73,10 @@ tracepoint-demo/src/
     │   ├── watch_pid_or_tty.rs
     │   └── watch_systemd_unit.rs
     ├── port/
+    │   ├── cgroup.rs
     │   ├── definitions.rs
     │   ├── mod.rs
+    │   ├── process_seed.rs
     │   └── runtime_update.rs
 ```
 
@@ -140,7 +143,10 @@ The current tree already follows the target layering:
 - `infra/runtime_loop.rs` owns the top-level async runtime loop
 - `infra/presentation/*.rs` owns CLI, output, waits, and runtime-update presentation helpers
 - `usecase/port/*.rs` owns the usecase-facing contracts and DTOs
-- `usecase/orchestration/*.rs` owns usecase-internal coordination helpers
+- `usecase/orchestration/startup_prepare.rs` owns startup planning
+- `usecase/orchestration/startup_runtime.rs` owns startup seeding and runtime initialization
+- `usecase/orchestration/watch_roots.rs` owns watch-root merge and diff logic
+- `usecase/orchestration/tty.rs` owns TTY normalization helpers
 - `usecase/policy/*.rs` owns target-selection behavior
 - `gateway/*.rs` owns concrete eBPF, procfs, Docker, and systemd I/O
 
@@ -155,10 +161,11 @@ For a first pass through the code, read these files in order:
 5. `tracepoint-demo/src/usecase/policy/trace_selected_targets.rs`: user-intent entry point
 6. `tracepoint-demo/src/usecase/port/definitions.rs`: port definitions and related DTOs
 7. `tracepoint-demo/src/usecase/orchestration/startup_prepare.rs`: startup planning seam
-8. `tracepoint-demo/src/usecase/orchestration/watch_roots.rs`: watch-root merge and diff logic
-9. `tracepoint-demo/src/usecase/policy/watch_*.rs`: target-mode-specific policy
-10. `tracepoint-demo/src/infra/runtime_loop.rs`: top-level runtime control loop
-11. `tracepoint-demo/src/gateway/*.rs`: concrete external operations
+8. `tracepoint-demo/src/usecase/orchestration/startup_runtime.rs`: startup seeding and runtime initialization
+9. `tracepoint-demo/src/usecase/orchestration/watch_roots.rs`: watch-root merge and diff logic
+10. `tracepoint-demo/src/usecase/policy/watch_*.rs`: target-mode-specific policy
+11. `tracepoint-demo/src/infra/runtime_loop.rs`: top-level runtime control loop
+12. `tracepoint-demo/src/gateway/*.rs`: concrete external operations
 
 That path follows the same order the program follows at runtime.
 
@@ -229,6 +236,7 @@ tracepoint-demo/src/
     ├── orchestration/
     │   ├── mod.rs
     │   ├── startup_prepare.rs
+    │   ├── startup_runtime.rs
     │   ├── state.rs
     │   ├── tty.rs
     │   └── watch_roots.rs
@@ -239,8 +247,10 @@ tracepoint-demo/src/
     │   ├── watch_pid_or_tty.rs
     │   └── watch_systemd_unit.rs
     └── port/
+      ├── cgroup.rs
         ├── definitions.rs
         ├── mod.rs
+      ├── process_seed.rs
         └── runtime_update.rs
 ```
 
@@ -255,10 +265,12 @@ This section is the quickest file lookup guide for common changes.
   - file: `tracepoint-demo/src/infra/presentation/cli.rs`
 - startup wiring, dependency setup, and runtime startup:
   - files: `tracepoint-demo/src/infra/bootstrap.rs` and `tracepoint-demo/src/infra/startup.rs`
+- startup seeding and runtime initialization policy:
+  - file: `tracepoint-demo/src/usecase/orchestration/startup_runtime.rs`
 - runtime loop control:
   - file: `tracepoint-demo/src/infra/runtime_loop.rs`
 - shared outbound traits and related DTOs:
-  - files: `tracepoint-demo/src/usecase/port/definitions.rs` and `tracepoint-demo/src/usecase/port/runtime_update.rs`
+  - files: `tracepoint-demo/src/usecase/port/definitions.rs`, `tracepoint-demo/src/usecase/port/runtime_update.rs`, `tracepoint-demo/src/usecase/port/process_seed.rs`, and `tracepoint-demo/src/usecase/port/cgroup.rs`
 - usecase-internal orchestration:
   - files under `tracepoint-demo/src/usecase/orchestration/`
 - PID or TTY wait behavior:
@@ -328,8 +340,11 @@ The current files are under `usecase/policy/`.
 
 - container runtime queries and monitoring
 - systemd status queries and monitoring
+- process seeding into the kernel-side watch state
+- cgroup path and `cgroup.procs` lookup
 - reporter and wait seams
-- any future tracing backend seams needed to remove direct eBPF/procfs calls from usecases
+- any future tracing backend seams needed to remove direct runtime-loop or startup wiring from
+  usecases
 
 Those abstractions belong to `usecase`, not to `gateway`, because the inner layer should own the
 contracts that outer layers implement.

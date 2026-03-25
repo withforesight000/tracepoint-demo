@@ -1,8 +1,8 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, future::Future, sync::Arc};
 
 use futures_util::StreamExt;
 use tokio::{
-    sync::mpsc,
+    sync::{Mutex, mpsc},
     time::{Duration, sleep},
 };
 use zbus::Error as ZbusError;
@@ -224,13 +224,6 @@ async fn monitor_systemd_runtime(
 ) -> anyhow::Result<()> {
     loop {
         let (resolved_unit, status) = wait_systemd_unit_running(&conn, &unit_name).await?;
-        let mut current = (status.main_pid, status.is_running());
-        let _ = tx.send(RuntimeUpdate::SystemdStatus {
-            index,
-            pid: current.0,
-            running: current.1,
-        });
-
         let properties_proxy = PropertiesProxy::builder(&conn)
             .destination("org.freedesktop.systemd1")
             .map_err(|err| anyhow::anyhow!("failed to set systemd destination: {err}"))?
@@ -247,48 +240,99 @@ async fn monitor_systemd_runtime(
             })?;
 
         let _ = main_pid_changes.next().await;
+        let main_pid_changes = Arc::new(Mutex::new(main_pid_changes));
+        let unit_proxy = resolved_unit.unit_proxy.clone();
+        let service_proxy = resolved_unit.service_proxy.clone();
 
-        loop {
-            let Some(changed) = main_pid_changes.next().await else {
+        relay_systemd_runtime_changes(
+            &tx,
+            index,
+            status,
+            {
+                let main_pid_changes = main_pid_changes.clone();
+                move || {
+                    let main_pid_changes = main_pid_changes.clone();
+                    async move {
+                        let maybe_changed = {
+                            let mut main_pid_changes = main_pid_changes.lock().await;
+                            main_pid_changes.next().await
+                        };
+                        let Some(changed) = maybe_changed else {
+                            return Ok(false);
+                        };
+
+                        let _ = changed.args().map_err(|err| {
+                            anyhow::anyhow!("failed to decode systemd properties change: {err}")
+                        })?;
+                        Ok(true)
+                    }
+                }
+            },
+            {
+                let unit_proxy = unit_proxy.clone();
+                let service_proxy = service_proxy.clone();
+                move || {
+                    let unit_proxy = unit_proxy.clone();
+                    let service_proxy = service_proxy.clone();
+                    async move { query_systemd_unit_status(&unit_proxy, &service_proxy).await }
+                }
+            },
+        )
+        .await?;
+    }
+}
+
+async fn relay_systemd_runtime_changes<TWait, TWaitFuture, TQuery, TQueryFuture>(
+    tx: &mpsc::UnboundedSender<RuntimeUpdate>,
+    index: usize,
+    initial_status: SystemdUnitStatus,
+    mut wait_for_change: TWait,
+    mut query_status: TQuery,
+) -> anyhow::Result<()>
+where
+    TWait: FnMut() -> TWaitFuture,
+    TWaitFuture: Future<Output = anyhow::Result<bool>>,
+    TQuery: FnMut() -> TQueryFuture,
+    TQueryFuture: Future<Output = Result<SystemdUnitStatus, SystemdUnitLookupError>>,
+{
+    let mut current = (initial_status.main_pid, initial_status.is_running());
+    let _ = tx.send(RuntimeUpdate::SystemdStatus {
+        index,
+        pid: current.0,
+        running: current.1,
+    });
+
+    loop {
+        if !wait_for_change().await? {
+            let _ = tx.send(RuntimeUpdate::SystemdStatus {
+                index,
+                pid: None,
+                running: false,
+            });
+            return Ok(());
+        }
+
+        let status = match query_status().await {
+            Ok(status) => status,
+            Err(SystemdUnitLookupError::NotFound) => {
                 let _ = tx.send(RuntimeUpdate::SystemdStatus {
                     index,
                     pid: None,
                     running: false,
                 });
-                break;
-            };
-
-            let _ = changed.args().map_err(|err| {
-                anyhow::anyhow!("failed to decode systemd properties change: {err}")
-            })?;
-
-            let status = match query_systemd_unit_status(
-                &resolved_unit.unit_proxy,
-                &resolved_unit.service_proxy,
-            )
-            .await
-            {
-                Ok(status) => status,
-                Err(SystemdUnitLookupError::NotFound) => {
-                    let _ = tx.send(RuntimeUpdate::SystemdStatus {
-                        index,
-                        pid: None,
-                        running: false,
-                    });
-                    break;
-                }
-                Err(SystemdUnitLookupError::Other(err)) => return Err(err),
-            };
-
-            let next = (status.main_pid, status.is_running());
-            if next != current {
-                current = next;
-                let _ = tx.send(RuntimeUpdate::SystemdStatus {
-                    index,
-                    pid: current.0,
-                    running: current.1,
-                });
+                return Ok(());
             }
+            Err(SystemdUnitLookupError::Other(err)) => return Err(err),
+        };
+
+        let next = (status.main_pid, status.is_running());
+        if next != current {
+            current = next;
+            let _ = tx.send(RuntimeUpdate::SystemdStatus {
+                index,
+                pid: current.0,
+                running: current.1,
+            });
         }
     }
 }
@@ -331,7 +375,38 @@ pub fn runtime_port(conn: zbus::Connection) -> SharedSystemdRuntimePort {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::VecDeque, sync::{Arc, Mutex}};
+
     use super::*;
+
+    fn drain_updates(
+        mut rx: mpsc::UnboundedReceiver<RuntimeUpdate>,
+    ) -> Vec<RuntimeUpdate> {
+        let mut updates = Vec::new();
+        while let Ok(update) = rx.try_recv() {
+            updates.push(update);
+        }
+        updates
+    }
+
+    #[test]
+    fn status_from_query_preserves_fields() {
+        let runtime_status = status_from_query(SystemdUnitStatus {
+            active_state: "active".to_string(),
+            sub_state: "running".to_string(),
+            main_pid: Some(77),
+        });
+
+        assert_eq!(
+            runtime_status,
+            SystemdUnitRuntimeStatus {
+                exists: true,
+                active_state: Some("active".to_string()),
+                sub_state: Some("running".to_string()),
+                main_pid: Some(77),
+            }
+        );
+    }
 
     #[test]
     fn systemd_unit_status_is_running_for_active_states() {
@@ -378,5 +453,121 @@ mod tests {
         if let Ok(conn) = zbus::Connection::system().await {
             let _runtime = runtime_port(conn);
         }
+    }
+
+    #[tokio::test]
+    async fn relay_systemd_runtime_changes_emits_initial_and_changed_statuses() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let changes: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> = Arc::new(Mutex::new(VecDeque::from([Ok(true), Ok(true), Ok(false)])));
+        let statuses: Arc<Mutex<VecDeque<Result<SystemdUnitStatus, SystemdUnitLookupError>>>> = Arc::new(Mutex::new(VecDeque::from([
+            Ok(SystemdUnitStatus {
+                active_state: "active".to_string(),
+                sub_state: "running".to_string(),
+                main_pid: Some(10),
+            }),
+            Ok(SystemdUnitStatus {
+                active_state: "active".to_string(),
+                sub_state: "running".to_string(),
+                main_pid: Some(22),
+            }),
+        ])));
+
+        relay_systemd_runtime_changes(
+            &tx,
+            2,
+            SystemdUnitStatus {
+                active_state: "active".to_string(),
+                sub_state: "running".to_string(),
+                main_pid: Some(10),
+            },
+            {
+                let changes = changes.clone();
+                move || {
+                    let changes = changes.clone();
+                    async move { changes.lock().unwrap().pop_front().unwrap() }
+                }
+            },
+            {
+                let statuses = statuses.clone();
+                move || {
+                    let statuses = statuses.clone();
+                    async move { statuses.lock().unwrap().pop_front().unwrap() }
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        let updates = drain_updates(rx);
+        assert_eq!(updates.len(), 3);
+        assert!(matches!(updates[0], RuntimeUpdate::SystemdStatus { index: 2, pid: Some(10), running: true }));
+        assert!(matches!(updates[1], RuntimeUpdate::SystemdStatus { index: 2, pid: Some(22), running: true }));
+        assert!(matches!(updates[2], RuntimeUpdate::SystemdStatus { index: 2, pid: None, running: false }));
+    }
+
+    #[tokio::test]
+    async fn relay_systemd_runtime_changes_sends_stopped_when_unit_disappears() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let changes: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> = Arc::new(Mutex::new(VecDeque::from([Ok(true)])));
+
+        relay_systemd_runtime_changes(
+            &tx,
+            0,
+            SystemdUnitStatus {
+                active_state: "active".to_string(),
+                sub_state: "running".to_string(),
+                main_pid: Some(7),
+            },
+            {
+                let changes = changes.clone();
+                move || {
+                    let changes = changes.clone();
+                    async move { changes.lock().unwrap().pop_front().unwrap() }
+                }
+            },
+            || async { Err(SystemdUnitLookupError::NotFound) },
+        )
+        .await
+        .unwrap();
+
+        let updates = drain_updates(rx);
+        assert_eq!(updates.len(), 2);
+        assert!(matches!(updates[0], RuntimeUpdate::SystemdStatus { index: 0, pid: Some(7), running: true }));
+        assert!(matches!(updates[1], RuntimeUpdate::SystemdStatus { index: 0, pid: None, running: false }));
+    }
+
+    #[tokio::test]
+    async fn relay_systemd_runtime_changes_propagates_query_errors() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let changes: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> = Arc::new(Mutex::new(VecDeque::from([Ok(true)])));
+
+        let err = relay_systemd_runtime_changes(
+            &tx,
+            1,
+            SystemdUnitStatus {
+                active_state: "active".to_string(),
+                sub_state: "running".to_string(),
+                main_pid: Some(9),
+            },
+            {
+                let changes = changes.clone();
+                move || {
+                    let changes = changes.clone();
+                    async move { changes.lock().unwrap().pop_front().unwrap() }
+                }
+            },
+            || async {
+                Err(SystemdUnitLookupError::Other(anyhow::anyhow!(
+                    "query failed"
+                )))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "query failed");
+        let updates = drain_updates(rx);
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(updates[0], RuntimeUpdate::SystemdStatus { index: 1, pid: Some(9), running: true }));
     }
 }

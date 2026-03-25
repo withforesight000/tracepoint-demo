@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use crate::{
-    gateway::ebpf::load_tracepoint_demo_ebpf,
+    gateway::{ebpf::load_tracepoint_demo_ebpf, procfs::ProcfsCgroupPort},
     infra::{
         docker,
         presentation::{cli::CliArgs, output::ConsoleStatusReporter, wait::SignalAwareWaitPort},
@@ -16,6 +16,7 @@ pub async fn run() -> anyhow::Result<()> {
     let systemd_runtime = systemd::connect_if_needed(&args.systemd_unit).await?;
     let request = args.into_request();
     let ebpf = load_tracepoint_demo_ebpf()?;
+    let cgroup_port = std::sync::Arc::new(ProcfsCgroupPort);
     let mut reporter = ConsoleStatusReporter;
     let mut wait_port = SignalAwareWaitPort;
 
@@ -23,6 +24,7 @@ pub async fn run() -> anyhow::Result<()> {
         request,
         startup::StartupResources {
             ebpf,
+            cgroup_port,
             container_runtime,
             systemd_runtime,
         },

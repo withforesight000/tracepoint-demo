@@ -5,35 +5,36 @@ use aya::Ebpf;
 use tracepoint_demo_common::{PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF};
 
 use crate::{
-    gateway::ebpf::{build_watch_pids, seed_proc_state_from_task_iter},
+    gateway::ebpf::{EbpfProcessSeedPort, build_watch_pids},
     usecase::{
         orchestration::{
             startup_prepare::{StartupPrepareBackend, StartupPrepareInputs, prepare_runtime_plan},
+            startup_runtime,
             state::{AppState, PreparedApp},
             tty::normalize_tty_name,
-            watch_roots::{add_watch_root, collect_watch_roots},
+            watch_roots::collect_watch_roots,
         },
         policy::{
-            trace_selected_targets::TraceRequest,
-            watch_container::{ContainerRuntime, seed_container_processes},
-            watch_pid_or_tty::wait_pid_or_tty_targets,
-            watch_systemd_unit::{
-                SystemdRuntime, SystemdSeedSpec, seed_systemd_unit_processes,
-                wait_systemd_unit_running,
-            },
+            trace_selected_targets::TraceRequest, watch_container::ContainerRuntime,
+            watch_systemd_unit::SystemdRuntime,
         },
-        port::{SharedContainerRuntimePort, SharedSystemdRuntimePort, StatusReporter, WaitPort},
+        port::{
+            SharedCgroupPort, SharedContainerRuntimePort, SharedSystemdRuntimePort, StatusReporter,
+            WaitPort,
+        },
     },
 };
 
 pub struct StartupResources {
     pub ebpf: Ebpf,
+    pub cgroup_port: SharedCgroupPort,
     pub container_runtime: Option<SharedContainerRuntimePort>,
     pub systemd_runtime: Option<SharedSystemdRuntimePort>,
 }
 
 struct StartupPrepareAdapter<'a, TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> {
     ebpf: &'a mut Ebpf,
+    cgroup_port: &'a SharedCgroupPort,
     container_runtime: Option<&'a SharedContainerRuntimePort>,
     systemd_runtime: Option<&'a SharedSystemdRuntimePort>,
     reporter: &'a mut TReporter,
@@ -54,34 +55,18 @@ impl<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> StartupPrepar
         watch_flags: u32,
         has_runtime_targets: bool,
     ) -> anyhow::Result<StdHashMap<u32, u32>> {
-        let mut static_watch_roots = StdHashMap::new();
-
-        if pids.is_empty() && tty_filters.is_empty() {
-            return Ok(static_watch_roots);
-        }
-
-        let roots = seed_proc_state_from_task_iter(self.ebpf, pids, tty_filters, watch_flags)?;
-        for pid in roots {
-            add_watch_root(&mut static_watch_roots, pid, watch_flags);
-        }
-
-        if static_watch_roots.is_empty() && !has_runtime_targets {
-            let roots = wait_pid_or_tty_targets(
-                self.ebpf,
-                pids,
-                tty_filters,
-                tty_inputs,
-                watch_flags,
-                &mut *self.reporter,
-                &mut *self.wait_port,
-            )
-            .await?;
-            for pid in roots {
-                add_watch_root(&mut static_watch_roots, pid, watch_flags);
-            }
-        }
-
-        Ok(static_watch_roots)
+        let mut process_seed = EbpfProcessSeedPort::new(self.ebpf);
+        startup_runtime::collect_static_watch_roots(
+            &mut process_seed,
+            pids,
+            tty_filters,
+            tty_inputs,
+            watch_flags,
+            has_runtime_targets,
+            &mut *self.reporter,
+            &mut *self.wait_port,
+        )
+        .await
     }
 
     async fn initialize_container_runtimes(
@@ -90,8 +75,10 @@ impl<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> StartupPrepar
         watch_children: bool,
         all_container_processes: bool,
     ) -> anyhow::Result<Vec<Self::ContainerRuntime>> {
-        initialize_container_runtimes(
-            self.ebpf,
+        let mut process_seed = EbpfProcessSeedPort::new(self.ebpf);
+        startup_runtime::initialize_container_runtimes(
+            &mut process_seed,
+            self.cgroup_port,
             &mut *self.reporter,
             self.container_runtime
                 .expect("container runtime should be available when initialization runs"),
@@ -108,8 +95,9 @@ impl<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> StartupPrepar
         watch_children: bool,
         all_systemd_processes: bool,
     ) -> anyhow::Result<Vec<Self::SystemdRuntime>> {
-        initialize_systemd_runtimes(
-            self.ebpf,
+        let mut process_seed = EbpfProcessSeedPort::new(self.ebpf);
+        startup_runtime::initialize_systemd_runtimes(
+            &mut process_seed,
             &mut *self.reporter,
             &mut *self.wait_port,
             self.systemd_runtime
@@ -180,127 +168,6 @@ fn collect_target_descriptions(
     target_descriptions
 }
 
-async fn initialize_container_runtimes<TReporter: StatusReporter + ?Sized>(
-    ebpf: &mut Ebpf,
-    reporter: &mut TReporter,
-    runtime: &SharedContainerRuntimePort,
-    containers: &[String],
-    watch_children: bool,
-    all_container_processes: bool,
-) -> anyhow::Result<Vec<ContainerRuntime>> {
-    let mut container_runtimes = Vec::new();
-    if containers.is_empty() {
-        return Ok(container_runtimes);
-    }
-
-    for container_name in containers {
-        let container_watch_children = if all_container_processes {
-            true
-        } else {
-            watch_children
-        };
-        let container_flags = PROC_FLAG_WATCH_SELF
-            | if container_watch_children {
-                PROC_FLAG_WATCH_CHILDREN
-            } else {
-                0
-            };
-
-        let current_pid = runtime.query_main_pid(container_name).await?;
-        if let Some(main_pid) = current_pid {
-            seed_container_processes(
-                ebpf,
-                reporter,
-                container_name,
-                main_pid,
-                container_flags,
-                container_watch_children,
-                all_container_processes,
-            )
-            .await?;
-        }
-
-        container_runtimes.push(ContainerRuntime {
-            runtime: runtime.clone(),
-            name_or_id: container_name.clone(),
-            watch_children: container_watch_children,
-            all_processes: all_container_processes,
-            flags: container_flags,
-            current_pid,
-        });
-    }
-
-    Ok(container_runtimes)
-}
-
-async fn initialize_systemd_runtimes<
-    TReporter: StatusReporter + ?Sized,
-    TWait: WaitPort + ?Sized,
->(
-    ebpf: &mut Ebpf,
-    reporter: &mut TReporter,
-    wait_port: &mut TWait,
-    runtime: &SharedSystemdRuntimePort,
-    systemd_units: &[String],
-    watch_children: bool,
-    all_systemd_processes: bool,
-) -> anyhow::Result<Vec<SystemdRuntime>> {
-    let mut systemd_runtimes = Vec::new();
-    if systemd_units.is_empty() {
-        return Ok(systemd_runtimes);
-    }
-
-    for unit_name in systemd_units {
-        let unit_watch_children = if all_systemd_processes {
-            true
-        } else {
-            watch_children
-        };
-        let unit_flags = PROC_FLAG_WATCH_SELF
-            | if unit_watch_children {
-                PROC_FLAG_WATCH_CHILDREN
-            } else {
-                0
-            };
-
-        let status = runtime.current_status(unit_name).await?;
-        let status = if status.exists && !status.is_running() {
-            wait_systemd_unit_running(runtime.as_ref(), reporter, wait_port, unit_name).await?
-        } else {
-            status
-        };
-
-        let current_running = status.is_running();
-        if current_running {
-            seed_systemd_unit_processes(
-                ebpf,
-                reporter,
-                runtime.as_ref(),
-                SystemdSeedSpec {
-                    unit_name,
-                    main_pid: status.main_pid,
-                    flags: unit_flags,
-                    watch_children: unit_watch_children,
-                    all_processes: all_systemd_processes,
-                },
-            )
-            .await?;
-        }
-
-        systemd_runtimes.push(SystemdRuntime {
-            runtime: runtime.clone(),
-            unit_name: unit_name.clone(),
-            watch_children: unit_watch_children,
-            all_processes: all_systemd_processes,
-            flags: unit_flags,
-            current_pid: status.main_pid,
-            current_running,
-        });
-    }
-
-    Ok(systemd_runtimes)
-}
-
 pub async fn prepare_prepared_app<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized>(
     request: TraceRequest,
     resources: StartupResources,
@@ -327,6 +194,7 @@ pub async fn prepare_prepared_app<TReporter: StatusReporter + ?Sized, TWait: Wai
 
     let StartupResources {
         ebpf,
+        cgroup_port,
         container_runtime,
         systemd_runtime,
     } = resources;
@@ -342,6 +210,7 @@ pub async fn prepare_prepared_app<TReporter: StatusReporter + ?Sized, TWait: Wai
         };
     let mut prepare_adapter = StartupPrepareAdapter {
         ebpf: &mut ebpf,
+        cgroup_port: &cgroup_port,
         container_runtime: container_runtime.as_ref(),
         systemd_runtime: systemd_runtime.as_ref(),
         reporter,
@@ -447,6 +316,7 @@ mod tests {
     #[test]
     fn collect_target_descriptions_includes_container_and_systemd_entries() {
         let container = ContainerRuntime {
+            cgroup_port: Arc::new(crate::gateway::procfs::ProcfsCgroupPort),
             runtime: Arc::new(FakeContainerRuntimePort),
             name_or_id: "ctr".to_string(),
             watch_children: false,
@@ -467,5 +337,39 @@ mod tests {
         let desc = collect_target_descriptions(&[container], &[systemd_runtime], false, false);
         assert!(desc.iter().any(|s| s.contains("containers")));
         assert!(desc.iter().any(|s| s.contains("systemd-units")));
+    }
+
+    #[test]
+    fn collect_target_descriptions_marks_all_container_processes() {
+        let container = ContainerRuntime {
+            cgroup_port: Arc::new(crate::gateway::procfs::ProcfsCgroupPort),
+            runtime: Arc::new(FakeContainerRuntimePort),
+            name_or_id: "ctr".to_string(),
+            watch_children: true,
+            all_processes: true,
+            flags: 1,
+            current_pid: Some(1),
+        };
+
+        let desc = collect_target_descriptions(&[container], &[], true, false);
+
+        assert_eq!(desc, vec!["containers=[ctr] seed=all-procs".to_string()]);
+    }
+
+    #[test]
+    fn collect_target_descriptions_marks_all_systemd_processes() {
+        let systemd_runtime = SystemdRuntime {
+            runtime: Arc::new(FakeSystemdRuntimePort),
+            unit_name: "svc".to_string(),
+            watch_children: false,
+            all_processes: true,
+            flags: 2,
+            current_pid: Some(2),
+            current_running: true,
+        };
+
+        let desc = collect_target_descriptions(&[], &[systemd_runtime], false, true);
+
+        assert_eq!(desc, vec!["systemd-units=[svc] seed=all-procs".to_string()]);
     }
 }

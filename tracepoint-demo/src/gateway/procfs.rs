@@ -1,5 +1,19 @@
 use std::{fs, path::PathBuf};
 
+use crate::usecase::port::CgroupPort;
+
+pub struct ProcfsCgroupPort;
+
+impl CgroupPort for ProcfsCgroupPort {
+    fn read_cgroup_v2_path(&self, pid: u32) -> anyhow::Result<String> {
+        read_cgroup_v2_path(pid)
+    }
+
+    fn read_cgroup_procs(&self, path: &str) -> anyhow::Result<Vec<u32>> {
+        read_cgroup_procs(path)
+    }
+}
+
 pub fn ensure_non_root_cgroup_path(path: &str, label: &str) -> anyhow::Result<()> {
     let trimmed = path.trim();
     if trimmed.is_empty() || trimmed == "/" {

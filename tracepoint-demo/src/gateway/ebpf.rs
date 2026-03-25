@@ -16,7 +16,32 @@ use tracepoint_demo_common::{
     EXEC_EVENTS_MAP, ExecEvent, PROC_FLAG_WATCH_CHILDREN, PROC_STATE_MAP, TaskRel, WATCH_PIDS_MAP,
 };
 
-use crate::usecase::orchestration::tty::normalize_tty_name;
+use crate::usecase::{orchestration::tty::normalize_tty_name, port::ProcessSeedPort};
+
+pub struct EbpfProcessSeedPort<'a> {
+    ebpf: &'a mut Ebpf,
+}
+
+impl<'a> EbpfProcessSeedPort<'a> {
+    pub fn new(ebpf: &'a mut Ebpf) -> Self {
+        Self { ebpf }
+    }
+}
+
+impl ProcessSeedPort for EbpfProcessSeedPort<'_> {
+    fn seed_from_task_iter(
+        &mut self,
+        pid_roots: &[u32],
+        tty_filters: &HashSet<String>,
+        watch_flags: u32,
+    ) -> anyhow::Result<Vec<u32>> {
+        seed_proc_state_from_task_iter(self.ebpf, pid_roots, tty_filters, watch_flags)
+    }
+
+    fn seed_direct(&mut self, pids: &[u32], flags: u32) -> anyhow::Result<()> {
+        seed_proc_state_direct(self.ebpf, pids, flags)
+    }
+}
 
 pub fn cstr_from_u8(bytes: &[u8]) -> String {
     let len = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
