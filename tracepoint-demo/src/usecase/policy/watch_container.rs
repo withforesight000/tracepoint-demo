@@ -17,44 +17,49 @@ pub struct ContainerRuntime {
     pub current_pid: Option<u32>,
 }
 
-pub async fn seed_container_processes<TReporter: StatusReporter + ?Sized>(
+pub(crate) struct ContainerSeedSpec<'a> {
+    pub name_or_id: &'a str,
+    pub main_pid: u32,
+    pub flags: u32,
+    pub watch_children: bool,
+    pub all_processes: bool,
+}
+
+pub(crate) async fn seed_container_processes<TReporter: StatusReporter + ?Sized>(
     process_seed: &mut dyn ProcessSeedPort,
-    cgroup_port: &dyn CgroupPort,
     reporter: &mut TReporter,
-    name_or_id: &str,
-    main_pid: u32,
-    container_flags: u32,
-    container_watch_children: bool,
-    all_container_processes: bool,
+    cgroup_port: &dyn CgroupPort,
+    spec: ContainerSeedSpec<'_>,
 ) -> anyhow::Result<()> {
-    if all_container_processes {
+    if spec.all_processes {
         match cgroup_port
-            .read_cgroup_v2_path(main_pid)
+            .read_cgroup_v2_path(spec.main_pid)
             .and_then(|path| cgroup_port.read_cgroup_procs(&path))
         {
-            Ok(pids) => process_seed.seed_direct(&pids, container_flags)?,
+            Ok(pids) => process_seed.seed_direct(&pids, spec.flags)?,
             Err(err) => {
                 reporter.warn(format!(
                     "Failed to read cgroup.procs for container {} (pid {}): {}. Falling back to task iterator seed.",
-                    name_or_id, main_pid, err
+                    spec.name_or_id, spec.main_pid, err
                 ));
                 let empty_tty_filters = HashSet::new();
                 let _ = process_seed.seed_from_task_iter(
-                    &[main_pid],
+                    &[spec.main_pid],
                     &empty_tty_filters,
-                    container_flags,
+                    spec.flags,
                 )?;
             }
         }
+
         return Ok(());
     }
 
-    if container_watch_children {
+    if spec.watch_children {
         let empty_tty_filters = HashSet::new();
         let _ =
-            process_seed.seed_from_task_iter(&[main_pid], &empty_tty_filters, container_flags)?;
+            process_seed.seed_from_task_iter(&[spec.main_pid], &empty_tty_filters, spec.flags)?;
     } else {
-        process_seed.seed_direct(&[main_pid], container_flags)?;
+        process_seed.seed_direct(&[spec.main_pid], spec.flags)?;
     }
 
     Ok(())
@@ -73,13 +78,15 @@ pub async fn apply_container_runtime_update<TReporter: StatusReporter + ?Sized>(
     if let Some(pid) = next_pid {
         seed_container_processes(
             process_seed,
-            runtime.cgroup_port.as_ref(),
             reporter,
-            &runtime.name_or_id,
-            pid,
-            runtime.flags,
-            runtime.watch_children,
-            runtime.all_processes,
+            runtime.cgroup_port.as_ref(),
+            ContainerSeedSpec {
+                name_or_id: &runtime.name_or_id,
+                main_pid: pid,
+                flags: runtime.flags,
+                watch_children: runtime.watch_children,
+                all_processes: runtime.all_processes,
+            },
         )
         .await?;
     }
@@ -161,13 +168,15 @@ mod tests {
 
         seed_container_processes(
             &mut process_seed,
-            &cgroup_port,
             &mut reporter,
-            "web",
-            99,
-            0x4,
-            true,
-            true,
+            &cgroup_port,
+            ContainerSeedSpec {
+                name_or_id: "web",
+                main_pid: 99,
+                flags: 0x4,
+                watch_children: true,
+                all_processes: true,
+            },
         )
         .await
         .unwrap();
@@ -203,13 +212,15 @@ mod tests {
 
         seed_container_processes(
             &mut process_seed,
-            &cgroup_port,
             &mut reporter,
-            "web",
-            99,
-            0x8,
-            true,
-            true,
+            &cgroup_port,
+            ContainerSeedSpec {
+                name_or_id: "web",
+                main_pid: 99,
+                flags: 0x8,
+                watch_children: true,
+                all_processes: true,
+            },
         )
         .await
         .unwrap();
@@ -252,13 +263,15 @@ mod tests {
 
         seed_container_processes(
             &mut process_seed,
-            &cgroup_port,
             &mut reporter,
-            "web",
-            42,
-            0x2,
-            true,
-            false,
+            &cgroup_port,
+            ContainerSeedSpec {
+                name_or_id: "web",
+                main_pid: 42,
+                flags: 0x2,
+                watch_children: true,
+                all_processes: false,
+            },
         )
         .await
         .unwrap();

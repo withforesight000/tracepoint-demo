@@ -5,7 +5,7 @@ use tracepoint_demo_common::{PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF};
 use crate::usecase::{
     orchestration::watch_roots::add_watch_root,
     policy::{
-        watch_container::{ContainerRuntime, seed_container_processes},
+        watch_container::{ContainerRuntime, ContainerSeedSpec, seed_container_processes},
         watch_pid_or_tty::wait_pid_or_tty_targets,
         watch_systemd_unit::{
             SystemdRuntime, SystemdSeedSpec, seed_systemd_unit_processes, wait_systemd_unit_running,
@@ -17,43 +17,47 @@ use crate::usecase::{
     },
 };
 
+pub(crate) struct StaticWatchRootsSpec<'a> {
+    pub pids: &'a [u32],
+    pub tty_filters: &'a HashSet<String>,
+    pub tty_inputs: &'a [String],
+    pub watch_flags: u32,
+    pub has_runtime_targets: bool,
+}
+
 pub(crate) async fn collect_static_watch_roots<
     TReporter: StatusReporter + ?Sized,
     TWait: WaitPort + ?Sized,
 >(
     process_seed: &mut dyn ProcessSeedPort,
-    pids: &[u32],
-    tty_filters: &HashSet<String>,
-    tty_inputs: &[String],
-    watch_flags: u32,
-    has_runtime_targets: bool,
+    spec: StaticWatchRootsSpec<'_>,
     reporter: &mut TReporter,
     wait_port: &mut TWait,
 ) -> anyhow::Result<StdHashMap<u32, u32>> {
     let mut static_watch_roots = StdHashMap::new();
 
-    if pids.is_empty() && tty_filters.is_empty() {
+    if spec.pids.is_empty() && spec.tty_filters.is_empty() {
         return Ok(static_watch_roots);
     }
 
-    let roots = process_seed.seed_from_task_iter(pids, tty_filters, watch_flags)?;
+    let roots = process_seed.seed_from_task_iter(spec.pids, spec.tty_filters, spec.watch_flags)?;
     for pid in roots {
-        add_watch_root(&mut static_watch_roots, pid, watch_flags);
+        add_watch_root(&mut static_watch_roots, pid, spec.watch_flags);
     }
 
-    if static_watch_roots.is_empty() && !has_runtime_targets {
+    if static_watch_roots.is_empty() && !spec.has_runtime_targets {
         let roots = wait_pid_or_tty_targets(
             process_seed,
-            pids,
-            tty_filters,
-            tty_inputs,
-            watch_flags,
+            spec.pids,
+            spec.tty_filters,
+            spec.tty_inputs,
+            spec.watch_flags,
             reporter,
             wait_port,
         )
         .await?;
         for pid in roots {
-            add_watch_root(&mut static_watch_roots, pid, watch_flags);
+            add_watch_root(&mut static_watch_roots, pid, spec.watch_flags);
         }
     }
 
@@ -91,13 +95,15 @@ pub(crate) async fn initialize_container_runtimes<TReporter: StatusReporter + ?S
         if let Some(main_pid) = current_pid {
             seed_container_processes(
                 process_seed,
-                cgroup_port.as_ref(),
                 reporter,
-                container_name,
-                main_pid,
-                container_flags,
-                container_watch_children,
-                all_container_processes,
+                cgroup_port.as_ref(),
+                ContainerSeedSpec {
+                    name_or_id: container_name,
+                    main_pid,
+                    flags: container_flags,
+                    watch_children: container_watch_children,
+                    all_processes: all_container_processes,
+                },
             )
             .await?;
         }
@@ -206,11 +212,13 @@ mod tests {
 
         let roots = collect_static_watch_roots(
             &mut process_seed,
-            &[],
-            &HashSet::new(),
-            &[],
-            0x1,
-            false,
+            StaticWatchRootsSpec {
+                pids: &[],
+                tty_filters: &HashSet::new(),
+                tty_inputs: &[],
+                watch_flags: 0x1,
+                has_runtime_targets: false,
+            },
             &mut reporter,
             &mut wait_port,
         )
@@ -250,11 +258,13 @@ mod tests {
 
         let roots = collect_static_watch_roots(
             &mut process_seed,
-            &[41],
-            &HashSet::new(),
-            &["pts/1".to_string()],
-            0x2,
-            false,
+            StaticWatchRootsSpec {
+                pids: &[41],
+                tty_filters: &HashSet::new(),
+                tty_inputs: &["pts/1".to_string()],
+                watch_flags: 0x2,
+                has_runtime_targets: false,
+            },
             &mut reporter,
             &mut wait_port,
         )

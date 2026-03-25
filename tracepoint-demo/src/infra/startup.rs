@@ -58,11 +58,13 @@ impl<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> StartupPrepar
         let mut process_seed = EbpfProcessSeedPort::new(self.ebpf);
         startup_runtime::collect_static_watch_roots(
             &mut process_seed,
-            pids,
-            tty_filters,
-            tty_inputs,
-            watch_flags,
-            has_runtime_targets,
+            startup_runtime::StaticWatchRootsSpec {
+                pids,
+                tty_filters,
+                tty_inputs,
+                watch_flags,
+                has_runtime_targets,
+            },
             &mut *self.reporter,
             &mut *self.wait_port,
         )
