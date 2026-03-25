@@ -106,9 +106,7 @@ mod tests {
     use super::*;
     use crate::{
         test_support::{NoopContainerRuntimePort, NoopSystemdRuntimePort},
-        usecase::{
-        policy::{watch_container::ContainerRuntime, watch_systemd_unit::SystemdRuntime},
-        },
+        usecase::policy::{watch_container::ContainerRuntime, watch_systemd_unit::SystemdRuntime},
     };
 
     #[test]

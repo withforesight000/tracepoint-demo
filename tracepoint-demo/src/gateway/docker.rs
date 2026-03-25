@@ -7,7 +7,11 @@ use bollard::{
     query_parameters::EventsOptions,
 };
 use futures_util::{StreamExt, stream::BoxStream};
-use tokio::{select, sync::{Mutex, mpsc}, time::sleep};
+use tokio::{
+    select,
+    sync::{Mutex, mpsc},
+    time::sleep,
+};
 
 use crate::usecase::port::{
     BoxFuture, ContainerRuntimePort, RuntimeUpdate, SharedContainerRuntimePort,
@@ -186,13 +190,14 @@ pub fn runtime_port(docker: Docker) -> SharedContainerRuntimePort {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::{Arc, Mutex}};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
 
     use super::*;
 
-    fn drain_updates(
-        mut rx: mpsc::UnboundedReceiver<RuntimeUpdate>,
-    ) -> Vec<RuntimeUpdate> {
+    fn drain_updates(mut rx: mpsc::UnboundedReceiver<RuntimeUpdate>) -> Vec<RuntimeUpdate> {
         let mut updates = Vec::new();
         while let Ok(update) = rx.try_recv() {
             updates.push(update);
@@ -266,16 +271,18 @@ mod tests {
     #[tokio::test]
     async fn monitor_container_runtime_with_sends_initial_and_changed_pids() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let signals: Arc<Mutex<VecDeque<anyhow::Result<()>>>> = Arc::new(Mutex::new(VecDeque::from([
-            Ok(()),
-            Ok(()),
-            Err(anyhow::anyhow!("stop")),
-        ])));
-        let pids: Arc<Mutex<VecDeque<anyhow::Result<Option<u32>>>>> = Arc::new(Mutex::new(VecDeque::from([
-            Ok(Some(10)),
-            Ok(Some(10)),
-            Ok(Some(20)),
-        ])));
+        let signals: Arc<Mutex<VecDeque<anyhow::Result<()>>>> =
+            Arc::new(Mutex::new(VecDeque::from([
+                Ok(()),
+                Ok(()),
+                Err(anyhow::anyhow!("stop")),
+            ])));
+        let pids: Arc<Mutex<VecDeque<anyhow::Result<Option<u32>>>>> =
+            Arc::new(Mutex::new(VecDeque::from([
+                Ok(Some(10)),
+                Ok(Some(10)),
+                Ok(Some(20)),
+            ])));
 
         let err = monitor_container_runtime_with(
             &tx,
@@ -284,18 +291,14 @@ mod tests {
                 let signals = signals.clone();
                 move || {
                     let signals = signals.clone();
-                    async move {
-                        signals.lock().unwrap().pop_front().unwrap()
-                    }
+                    async move { signals.lock().unwrap().pop_front().unwrap() }
                 }
             },
             {
                 let pids = pids.clone();
                 move || {
                     let pids = pids.clone();
-                    async move {
-                        pids.lock().unwrap().pop_front().unwrap()
-                    }
+                    async move { pids.lock().unwrap().pop_front().unwrap() }
                 }
             },
         )
@@ -305,18 +308,32 @@ mod tests {
         assert_eq!(err.to_string(), "stop");
         let updates = drain_updates(rx);
         assert_eq!(updates.len(), 2);
-        assert!(matches!(updates[0], RuntimeUpdate::ContainerPid { index: 3, pid: Some(10) }));
-        assert!(matches!(updates[1], RuntimeUpdate::ContainerPid { index: 3, pid: Some(20) }));
+        assert!(matches!(
+            updates[0],
+            RuntimeUpdate::ContainerPid {
+                index: 3,
+                pid: Some(10)
+            }
+        ));
+        assert!(matches!(
+            updates[1],
+            RuntimeUpdate::ContainerPid {
+                index: 3,
+                pid: Some(20)
+            }
+        ));
     }
 
     #[tokio::test]
     async fn monitor_container_runtime_with_propagates_query_errors_after_initial_send() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let signals: Arc<Mutex<VecDeque<anyhow::Result<()>>>> = Arc::new(Mutex::new(VecDeque::from([Ok(())])));
-        let pids: Arc<Mutex<VecDeque<anyhow::Result<Option<u32>>>>> = Arc::new(Mutex::new(VecDeque::from([
-            Ok(Some(10)),
-            Err(anyhow::anyhow!("inspect failed")),
-        ])));
+        let signals: Arc<Mutex<VecDeque<anyhow::Result<()>>>> =
+            Arc::new(Mutex::new(VecDeque::from([Ok(())])));
+        let pids: Arc<Mutex<VecDeque<anyhow::Result<Option<u32>>>>> =
+            Arc::new(Mutex::new(VecDeque::from([
+                Ok(Some(10)),
+                Err(anyhow::anyhow!("inspect failed")),
+            ])));
 
         let err = monitor_container_runtime_with(
             &tx,
@@ -325,18 +342,14 @@ mod tests {
                 let signals = signals.clone();
                 move || {
                     let signals = signals.clone();
-                    async move {
-                        signals.lock().unwrap().pop_front().unwrap()
-                    }
+                    async move { signals.lock().unwrap().pop_front().unwrap() }
                 }
             },
             {
                 let pids = pids.clone();
                 move || {
                     let pids = pids.clone();
-                    async move {
-                        pids.lock().unwrap().pop_front().unwrap()
-                    }
+                    async move { pids.lock().unwrap().pop_front().unwrap() }
                 }
             },
         )
@@ -346,6 +359,12 @@ mod tests {
         assert_eq!(err.to_string(), "inspect failed");
         let updates = drain_updates(rx);
         assert_eq!(updates.len(), 1);
-        assert!(matches!(updates[0], RuntimeUpdate::ContainerPid { index: 1, pid: Some(10) }));
+        assert!(matches!(
+            updates[0],
+            RuntimeUpdate::ContainerPid {
+                index: 1,
+                pid: Some(10)
+            }
+        ));
     }
 }

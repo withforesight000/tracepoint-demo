@@ -8,8 +8,7 @@ use crate::usecase::{
         watch_container::{ContainerRuntime, seed_container_processes},
         watch_pid_or_tty::wait_pid_or_tty_targets,
         watch_systemd_unit::{
-            SystemdRuntime, SystemdSeedSpec, seed_systemd_unit_processes,
-            wait_systemd_unit_running,
+            SystemdRuntime, SystemdSeedSpec, seed_systemd_unit_processes, wait_systemd_unit_running,
         },
     },
     port::{
@@ -187,12 +186,15 @@ pub(crate) async fn initialize_systemd_runtimes<
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::{Arc, Mutex}};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
 
     use super::*;
     use crate::test_support::{
-        boxed_future, MockCgroupPort, MockProcessSeedPort, MockStatusReporter, MockWaitPort,
-        QueuedContainerRuntimePort, QueuedSystemdRuntimePort,
+        MockCgroupPort, MockProcessSeedPort, MockStatusReporter, MockWaitPort,
+        QueuedContainerRuntimePort, QueuedSystemdRuntimePort, boxed_future,
     };
     use crate::usecase::port::SystemdUnitRuntimeStatus;
 
@@ -284,7 +286,8 @@ mod tests {
             .withf(|path| path == "/demo")
             .returning(|_| Ok(vec![50, 51]));
         let cgroup_port: SharedCgroupPort = Arc::new(cgroup_port);
-        let runtime: SharedContainerRuntimePort = Arc::new(QueuedContainerRuntimePort::new(vec![Ok(Some(50))]));
+        let runtime: SharedContainerRuntimePort =
+            Arc::new(QueuedContainerRuntimePort::new(vec![Ok(Some(50))]));
         let mut reporter = MockStatusReporter::new();
 
         let runtimes = initialize_container_runtimes(
@@ -309,7 +312,8 @@ mod tests {
     async fn initialize_container_runtimes_skips_seed_when_runtime_has_no_pid() {
         let mut process_seed = MockProcessSeedPort::new();
         let cgroup_port: SharedCgroupPort = Arc::new(MockCgroupPort::new());
-        let runtime: SharedContainerRuntimePort = Arc::new(QueuedContainerRuntimePort::new(vec![Ok(None)]));
+        let runtime: SharedContainerRuntimePort =
+            Arc::new(QueuedContainerRuntimePort::new(vec![Ok(None)]));
         let mut reporter = MockStatusReporter::new();
 
         let runtimes = initialize_container_runtimes(
@@ -355,7 +359,8 @@ mod tests {
             .times(1)
             .withf(|pids, flags| pids == [80] && *flags == PROC_FLAG_WATCH_SELF)
             .returning(|_, _| Ok(()));
-        let runtime: SharedSystemdRuntimePort = Arc::new(QueuedSystemdRuntimePort::with_statuses(statuses));
+        let runtime: SharedSystemdRuntimePort =
+            Arc::new(QueuedSystemdRuntimePort::with_statuses(statuses));
         let mut reporter = MockStatusReporter::new();
         reporter.expect_info().times(1).return_const(());
         let mut wait_port = MockWaitPort::new();
@@ -384,7 +389,9 @@ mod tests {
     #[tokio::test]
     async fn initialize_systemd_runtimes_keeps_missing_unit_stopped_without_seeding() {
         let mut process_seed = MockProcessSeedPort::new();
-        let runtime: SharedSystemdRuntimePort = Arc::new(QueuedSystemdRuntimePort::with_statuses(vec![Ok(SystemdUnitRuntimeStatus::missing())]));
+        let runtime: SharedSystemdRuntimePort = Arc::new(QueuedSystemdRuntimePort::with_statuses(
+            vec![Ok(SystemdUnitRuntimeStatus::missing())],
+        ));
         let mut reporter = MockStatusReporter::new();
         let mut wait_port = MockWaitPort::new();
 

@@ -39,8 +39,11 @@ pub async fn seed_container_processes<TReporter: StatusReporter + ?Sized>(
                     name_or_id, main_pid, err
                 ));
                 let empty_tty_filters = HashSet::new();
-                let _ =
-                    process_seed.seed_from_task_iter(&[main_pid], &empty_tty_filters, container_flags)?;
+                let _ = process_seed.seed_from_task_iter(
+                    &[main_pid],
+                    &empty_tty_filters,
+                    container_flags,
+                )?;
             }
         }
         return Ok(());
@@ -48,7 +51,8 @@ pub async fn seed_container_processes<TReporter: StatusReporter + ?Sized>(
 
     if container_watch_children {
         let empty_tty_filters = HashSet::new();
-        let _ = process_seed.seed_from_task_iter(&[main_pid], &empty_tty_filters, container_flags)?;
+        let _ =
+            process_seed.seed_from_task_iter(&[main_pid], &empty_tty_filters, container_flags)?;
     } else {
         process_seed.seed_direct(&[main_pid], container_flags)?;
     }
@@ -133,7 +137,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_container_processes_uses_direct_seed_for_all_processes_when_cgroup_lookup_succeeds() {
+    async fn seed_container_processes_uses_direct_seed_for_all_processes_when_cgroup_lookup_succeeds()
+     {
         let mut process_seed = MockProcessSeedPort::new();
         let mut cgroup_port = MockCgroupPort::new();
         let mut reporter = MockStatusReporter::new();

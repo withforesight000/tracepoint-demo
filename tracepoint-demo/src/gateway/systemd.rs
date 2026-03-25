@@ -375,13 +375,14 @@ pub fn runtime_port(conn: zbus::Connection) -> SharedSystemdRuntimePort {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::{Arc, Mutex}};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
 
     use super::*;
 
-    fn drain_updates(
-        mut rx: mpsc::UnboundedReceiver<RuntimeUpdate>,
-    ) -> Vec<RuntimeUpdate> {
+    fn drain_updates(mut rx: mpsc::UnboundedReceiver<RuntimeUpdate>) -> Vec<RuntimeUpdate> {
         let mut updates = Vec::new();
         while let Ok(update) = rx.try_recv() {
             updates.push(update);
@@ -458,19 +459,21 @@ mod tests {
     #[tokio::test]
     async fn relay_systemd_runtime_changes_emits_initial_and_changed_statuses() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let changes: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> = Arc::new(Mutex::new(VecDeque::from([Ok(true), Ok(true), Ok(false)])));
-        let statuses: Arc<Mutex<VecDeque<Result<SystemdUnitStatus, SystemdUnitLookupError>>>> = Arc::new(Mutex::new(VecDeque::from([
-            Ok(SystemdUnitStatus {
-                active_state: "active".to_string(),
-                sub_state: "running".to_string(),
-                main_pid: Some(10),
-            }),
-            Ok(SystemdUnitStatus {
-                active_state: "active".to_string(),
-                sub_state: "running".to_string(),
-                main_pid: Some(22),
-            }),
-        ])));
+        let changes: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> =
+            Arc::new(Mutex::new(VecDeque::from([Ok(true), Ok(true), Ok(false)])));
+        let statuses: Arc<Mutex<VecDeque<Result<SystemdUnitStatus, SystemdUnitLookupError>>>> =
+            Arc::new(Mutex::new(VecDeque::from([
+                Ok(SystemdUnitStatus {
+                    active_state: "active".to_string(),
+                    sub_state: "running".to_string(),
+                    main_pid: Some(10),
+                }),
+                Ok(SystemdUnitStatus {
+                    active_state: "active".to_string(),
+                    sub_state: "running".to_string(),
+                    main_pid: Some(22),
+                }),
+            ])));
 
         relay_systemd_runtime_changes(
             &tx,
@@ -500,15 +503,37 @@ mod tests {
 
         let updates = drain_updates(rx);
         assert_eq!(updates.len(), 3);
-        assert!(matches!(updates[0], RuntimeUpdate::SystemdStatus { index: 2, pid: Some(10), running: true }));
-        assert!(matches!(updates[1], RuntimeUpdate::SystemdStatus { index: 2, pid: Some(22), running: true }));
-        assert!(matches!(updates[2], RuntimeUpdate::SystemdStatus { index: 2, pid: None, running: false }));
+        assert!(matches!(
+            updates[0],
+            RuntimeUpdate::SystemdStatus {
+                index: 2,
+                pid: Some(10),
+                running: true
+            }
+        ));
+        assert!(matches!(
+            updates[1],
+            RuntimeUpdate::SystemdStatus {
+                index: 2,
+                pid: Some(22),
+                running: true
+            }
+        ));
+        assert!(matches!(
+            updates[2],
+            RuntimeUpdate::SystemdStatus {
+                index: 2,
+                pid: None,
+                running: false
+            }
+        ));
     }
 
     #[tokio::test]
     async fn relay_systemd_runtime_changes_sends_stopped_when_unit_disappears() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let changes: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> = Arc::new(Mutex::new(VecDeque::from([Ok(true)])));
+        let changes: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> =
+            Arc::new(Mutex::new(VecDeque::from([Ok(true)])));
 
         relay_systemd_runtime_changes(
             &tx,
@@ -532,14 +557,29 @@ mod tests {
 
         let updates = drain_updates(rx);
         assert_eq!(updates.len(), 2);
-        assert!(matches!(updates[0], RuntimeUpdate::SystemdStatus { index: 0, pid: Some(7), running: true }));
-        assert!(matches!(updates[1], RuntimeUpdate::SystemdStatus { index: 0, pid: None, running: false }));
+        assert!(matches!(
+            updates[0],
+            RuntimeUpdate::SystemdStatus {
+                index: 0,
+                pid: Some(7),
+                running: true
+            }
+        ));
+        assert!(matches!(
+            updates[1],
+            RuntimeUpdate::SystemdStatus {
+                index: 0,
+                pid: None,
+                running: false
+            }
+        ));
     }
 
     #[tokio::test]
     async fn relay_systemd_runtime_changes_propagates_query_errors() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let changes: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> = Arc::new(Mutex::new(VecDeque::from([Ok(true)])));
+        let changes: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> =
+            Arc::new(Mutex::new(VecDeque::from([Ok(true)])));
 
         let err = relay_systemd_runtime_changes(
             &tx,
@@ -568,6 +608,13 @@ mod tests {
         assert_eq!(err.to_string(), "query failed");
         let updates = drain_updates(rx);
         assert_eq!(updates.len(), 1);
-        assert!(matches!(updates[0], RuntimeUpdate::SystemdStatus { index: 1, pid: Some(9), running: true }));
+        assert!(matches!(
+            updates[0],
+            RuntimeUpdate::SystemdStatus {
+                index: 1,
+                pid: Some(9),
+                running: true
+            }
+        ));
     }
 }

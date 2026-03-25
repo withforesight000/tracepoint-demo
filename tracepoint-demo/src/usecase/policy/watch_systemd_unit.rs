@@ -168,8 +168,8 @@ mod tests {
 
     use super::*;
     use crate::test_support::{
-        boxed_future, MockProcessSeedPort, MockStatusReporter, MockWaitPort,
-        NoopSystemdRuntimePort, QueuedSystemdRuntimePort,
+        MockProcessSeedPort, MockStatusReporter, MockWaitPort, NoopSystemdRuntimePort,
+        QueuedSystemdRuntimePort, boxed_future,
     };
 
     #[tokio::test]
@@ -200,29 +200,31 @@ mod tests {
 
     #[tokio::test]
     async fn wait_systemd_unit_running_announces_once_until_running() {
-        let runtime = QueuedSystemdRuntimePort::with_statuses(vec![
-            SystemdUnitRuntimeStatus {
-                exists: true,
-                active_state: Some("inactive".to_string()),
-                sub_state: Some("dead".to_string()),
-                main_pid: None,
-            },
-            SystemdUnitRuntimeStatus {
-                exists: true,
-                active_state: Some("inactive".to_string()),
-                sub_state: Some("dead".to_string()),
-                main_pid: None,
-            },
-            SystemdUnitRuntimeStatus {
-                exists: true,
-                active_state: Some("reloading".to_string()),
-                sub_state: Some("running".to_string()),
-                main_pid: Some(456),
-            },
-        ]
-        .into_iter()
-        .map(Ok)
-        .collect());
+        let runtime = QueuedSystemdRuntimePort::with_statuses(
+            vec![
+                SystemdUnitRuntimeStatus {
+                    exists: true,
+                    active_state: Some("inactive".to_string()),
+                    sub_state: Some("dead".to_string()),
+                    main_pid: None,
+                },
+                SystemdUnitRuntimeStatus {
+                    exists: true,
+                    active_state: Some("inactive".to_string()),
+                    sub_state: Some("dead".to_string()),
+                    main_pid: None,
+                },
+                SystemdUnitRuntimeStatus {
+                    exists: true,
+                    active_state: Some("reloading".to_string()),
+                    sub_state: Some("running".to_string()),
+                    main_pid: Some(456),
+                },
+            ]
+            .into_iter()
+            .map(Ok)
+            .collect(),
+        );
         let mut reporter = MockStatusReporter::new();
         reporter
             .expect_info()
@@ -250,7 +252,8 @@ mod tests {
 
     #[tokio::test]
     async fn wait_systemd_unit_running_reports_missing_unit_and_propagates_wait_error() {
-        let runtime = QueuedSystemdRuntimePort::with_statuses(vec![Ok(SystemdUnitRuntimeStatus::missing())]);
+        let runtime =
+            QueuedSystemdRuntimePort::with_statuses(vec![Ok(SystemdUnitRuntimeStatus::missing())]);
         let mut reporter = MockStatusReporter::new();
         reporter
             .expect_info()
@@ -313,7 +316,9 @@ mod tests {
                 pid_roots == [77] && tty_filters.is_empty() && *watch_flags == 0x8
             })
             .returning(|_, _, _| Ok(vec![77]));
-        let runtime = QueuedSystemdRuntimePort::with_unit_pids_result(Err(anyhow::anyhow!("unit pids unavailable")));
+        let runtime = QueuedSystemdRuntimePort::with_unit_pids_result(Err(anyhow::anyhow!(
+            "unit pids unavailable"
+        )));
         let mut reporter = MockStatusReporter::new();
         reporter.expect_warn().times(1).return_const(());
 

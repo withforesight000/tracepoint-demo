@@ -8,9 +8,13 @@ use std::{
 use mockall::mock;
 use tokio::sync::mpsc;
 
-use crate::usecase::port::{ContainerRuntimePort, RuntimeUpdate, SystemdRuntimePort, SystemdUnitRuntimeStatus};
+use crate::usecase::port::{
+    ContainerRuntimePort, RuntimeUpdate, SystemdRuntimePort, SystemdUnitRuntimeStatus,
+};
 
-pub fn boxed_future<T: Send + 'static>(value: T) -> Pin<Box<dyn Future<Output = T> + Send + 'static>> {
+pub fn boxed_future<T: Send + 'static>(
+    value: T,
+) -> Pin<Box<dyn Future<Output = T> + Send + 'static>> {
     Box::pin(async move { value })
 }
 

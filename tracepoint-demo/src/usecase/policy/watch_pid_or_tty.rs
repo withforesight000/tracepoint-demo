@@ -40,10 +40,15 @@ pub async fn wait_pid_or_tty_targets<
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::{Arc, Mutex}};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
 
     use super::*;
-    use crate::test_support::{boxed_future, MockProcessSeedPort, MockStatusReporter, MockWaitPort};
+    use crate::test_support::{
+        MockProcessSeedPort, MockStatusReporter, MockWaitPort, boxed_future,
+    };
 
     #[tokio::test]
     async fn wait_pid_or_tty_targets_returns_immediately_when_roots_are_found() {
@@ -107,7 +112,8 @@ mod tests {
             .times(2)
             .withf(|duration, interrupted_message| {
                 *duration == Duration::from_secs(1)
-                    && interrupted_message == "Interrupted while waiting for matching PID/TTY targets."
+                    && interrupted_message
+                        == "Interrupted while waiting for matching PID/TTY targets."
             })
             .returning(|_, _| boxed_future(Ok(())));
 
@@ -146,7 +152,8 @@ mod tests {
             .times(1)
             .withf(|duration, interrupted_message| {
                 *duration == Duration::from_secs(1)
-                    && interrupted_message == "Interrupted while waiting for matching PID/TTY targets."
+                    && interrupted_message
+                        == "Interrupted while waiting for matching PID/TTY targets."
             })
             .returning(|_, _| boxed_future(Err(anyhow::anyhow!("wait interrupted"))));
 

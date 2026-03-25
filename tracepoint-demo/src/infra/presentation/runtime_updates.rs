@@ -275,5 +275,4 @@ mod tests {
         assert_eq!(err.to_string(), "container runtime index 1 out of range");
         assert_eq!(backend.refresh_count, 0);
     }
-
 }

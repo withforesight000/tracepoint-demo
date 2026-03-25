@@ -23,7 +23,11 @@ pub fn spawn_monitors(
     state: &AppState,
     update_tx: &mpsc::UnboundedSender<RuntimeUpdate>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
-    spawn_monitors_for_runtimes(&state.container_runtimes, &state.systemd_runtimes, update_tx)
+    spawn_monitors_for_runtimes(
+        &state.container_runtimes,
+        &state.systemd_runtimes,
+        update_tx,
+    )
 }
 
 fn spawn_monitors_for_runtimes(
@@ -32,8 +36,14 @@ fn spawn_monitors_for_runtimes(
     update_tx: &mpsc::UnboundedSender<RuntimeUpdate>,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     let mut monitor_handles = Vec::new();
-    monitor_handles.extend(watch_container::spawn_monitors(container_runtimes, update_tx));
-    monitor_handles.extend(watch_systemd_unit::spawn_monitors(systemd_runtimes, update_tx));
+    monitor_handles.extend(watch_container::spawn_monitors(
+        container_runtimes,
+        update_tx,
+    ));
+    monitor_handles.extend(watch_systemd_unit::spawn_monitors(
+        systemd_runtimes,
+        update_tx,
+    ));
     monitor_handles
 }
 
