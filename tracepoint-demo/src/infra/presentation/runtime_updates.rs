@@ -109,48 +109,15 @@ mod tests {
     use super::*;
     use crate::{
         gateway::procfs::ProcfsCgroupPort,
+        test_support::{
+            MockProcessSeedPort, MockStatusReporter, NoopContainerRuntimePort,
+            NoopSystemdRuntimePort,
+        },
         usecase::{
             policy::{watch_container::ContainerRuntime, watch_systemd_unit::SystemdRuntime},
-            port::{
-                BoxFuture, ContainerRuntimePort, RuntimeUpdate, SystemdRuntimePort,
-                SystemdUnitRuntimeStatus,
-            },
+            port::RuntimeUpdate,
         },
     };
-
-    #[derive(Default)]
-    struct FakeProcessSeedPort {
-        direct_calls: Vec<(Vec<u32>, u32)>,
-    }
-
-    impl ProcessSeedPort for FakeProcessSeedPort {
-        fn seed_from_task_iter(
-            &mut self,
-            _pid_roots: &[u32],
-            _tty_filters: &std::collections::HashSet<String>,
-            _watch_flags: u32,
-        ) -> anyhow::Result<Vec<u32>> {
-            Ok(Vec::new())
-        }
-
-        fn seed_direct(&mut self, pids: &[u32], flags: u32) -> anyhow::Result<()> {
-            self.direct_calls.push((pids.to_vec(), flags));
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct FakeReporter {
-        warnings: Vec<String>,
-    }
-
-    impl StatusReporter for FakeReporter {
-        fn info(&mut self, _message: String) {}
-
-        fn warn(&mut self, message: String) {
-            self.warnings.push(message);
-        }
-    }
 
     struct FakeBackend {
         container_runtimes: Vec<ContainerRuntime>,
@@ -181,57 +148,10 @@ mod tests {
         }
     }
 
-    struct FakeContainerRuntimePort;
-
-    impl ContainerRuntimePort for FakeContainerRuntimePort {
-        fn query_main_pid<'a>(
-            &'a self,
-            _name_or_id: &'a str,
-        ) -> BoxFuture<'a, anyhow::Result<Option<u32>>> {
-            Box::pin(async { Ok(None) })
-        }
-
-        fn spawn_monitor(
-            &self,
-            _name_or_id: String,
-            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
-            _index: usize,
-        ) -> tokio::task::JoinHandle<()> {
-            tokio::spawn(async {})
-        }
-    }
-
-    struct FakeSystemdRuntimePort;
-
-    impl SystemdRuntimePort for FakeSystemdRuntimePort {
-        fn current_status<'a>(
-            &'a self,
-            _unit_name: &'a str,
-        ) -> BoxFuture<'a, anyhow::Result<SystemdUnitRuntimeStatus>> {
-            Box::pin(async { Ok(SystemdUnitRuntimeStatus::missing()) })
-        }
-
-        fn unit_pids<'a>(
-            &'a self,
-            _unit_name: &'a str,
-        ) -> BoxFuture<'a, anyhow::Result<Vec<u32>>> {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn spawn_monitor(
-            &self,
-            _unit_name: String,
-            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
-            _index: usize,
-        ) -> tokio::task::JoinHandle<()> {
-            tokio::spawn(async {})
-        }
-    }
-
     fn container_runtime(current_pid: Option<u32>) -> ContainerRuntime {
         ContainerRuntime {
             cgroup_port: Arc::new(ProcfsCgroupPort),
-            runtime: Arc::new(FakeContainerRuntimePort),
+            runtime: Arc::new(NoopContainerRuntimePort),
             name_or_id: "web".to_string(),
             watch_children: false,
             all_processes: false,
@@ -242,7 +162,7 @@ mod tests {
 
     fn systemd_runtime(current_pid: Option<u32>, current_running: bool) -> SystemdRuntime {
         SystemdRuntime {
-            runtime: Arc::new(FakeSystemdRuntimePort),
+            runtime: Arc::new(NoopSystemdRuntimePort),
             unit_name: "svc.service".to_string(),
             watch_children: false,
             all_processes: false,
@@ -254,14 +174,19 @@ mod tests {
 
     #[tokio::test]
     async fn state_runtime_update_handler_applies_container_pid_and_refreshes() {
-        let mut process_seed = FakeProcessSeedPort::default();
+        let mut process_seed = MockProcessSeedPort::new();
+        process_seed
+            .expect_seed_direct()
+            .times(1)
+            .withf(|pids, flags| pids == [41] && *flags == 0x3)
+            .returning(|_, _| Ok(()));
         let mut backend = FakeBackend {
             container_runtimes: vec![container_runtime(None)],
             systemd_runtimes: Vec::new(),
             refresh_count: 0,
             refresh_error: None,
         };
-        let mut reporter = FakeReporter::default();
+        let mut reporter = MockStatusReporter::new();
         let mut handler = StateRuntimeUpdateHandler {
             process_seed: &mut process_seed,
             backend: &mut backend,
@@ -280,20 +205,24 @@ mod tests {
 
         assert!(keep_running);
         assert_eq!(backend.container_runtimes[0].current_pid, Some(41));
-        assert_eq!(process_seed.direct_calls, vec![(vec![41], 0x3)]);
         assert_eq!(backend.refresh_count, 1);
     }
 
     #[tokio::test]
     async fn state_runtime_update_handler_applies_systemd_status_and_refreshes() {
-        let mut process_seed = FakeProcessSeedPort::default();
+        let mut process_seed = MockProcessSeedPort::new();
+        process_seed
+            .expect_seed_direct()
+            .times(1)
+            .withf(|pids, flags| pids == [77] && *flags == 0x7)
+            .returning(|_, _| Ok(()));
         let mut backend = FakeBackend {
             container_runtimes: Vec::new(),
             systemd_runtimes: vec![systemd_runtime(None, false)],
             refresh_count: 0,
             refresh_error: None,
         };
-        let mut reporter = FakeReporter::default();
+        let mut reporter = MockStatusReporter::new();
         let mut handler = StateRuntimeUpdateHandler {
             process_seed: &mut process_seed,
             backend: &mut backend,
@@ -314,20 +243,19 @@ mod tests {
         assert!(keep_running);
         assert_eq!(backend.systemd_runtimes[0].current_pid, Some(77));
         assert!(backend.systemd_runtimes[0].current_running);
-        assert_eq!(process_seed.direct_calls, vec![(vec![77], 0x7)]);
         assert_eq!(backend.refresh_count, 1);
     }
 
     #[tokio::test]
     async fn state_runtime_update_handler_reports_out_of_range_container_index() {
-        let mut process_seed = FakeProcessSeedPort::default();
+        let mut process_seed = MockProcessSeedPort::new();
         let mut backend = FakeBackend {
             container_runtimes: Vec::new(),
             systemd_runtimes: Vec::new(),
             refresh_count: 0,
             refresh_error: None,
         };
-        let mut reporter = FakeReporter::default();
+        let mut reporter = MockStatusReporter::new();
         let mut handler = StateRuntimeUpdateHandler {
             process_seed: &mut process_seed,
             backend: &mut backend,

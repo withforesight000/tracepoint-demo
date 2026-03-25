@@ -190,186 +190,17 @@ mod tests {
     use std::{collections::VecDeque, sync::{Arc, Mutex}};
 
     use super::*;
-    use crate::usecase::port::{
-        BoxFuture, ContainerRuntimePort, RuntimeUpdate, SystemdRuntimePort,
-        SystemdUnitRuntimeStatus,
+    use crate::test_support::{
+        boxed_future, MockCgroupPort, MockProcessSeedPort, MockStatusReporter, MockWaitPort,
+        QueuedContainerRuntimePort, QueuedSystemdRuntimePort,
     };
-
-    struct FakeProcessSeedPort {
-        results: VecDeque<anyhow::Result<Vec<u32>>>,
-        direct_calls: Vec<(Vec<u32>, u32)>,
-        task_iter_calls: Vec<(Vec<u32>, HashSet<String>, u32)>,
-    }
-
-    impl FakeProcessSeedPort {
-        fn with_results(results: Vec<anyhow::Result<Vec<u32>>>) -> Self {
-            Self {
-                results: results.into(),
-                direct_calls: Vec::new(),
-                task_iter_calls: Vec::new(),
-            }
-        }
-    }
-
-    impl Default for FakeProcessSeedPort {
-        fn default() -> Self {
-            Self::with_results(vec![Ok(Vec::new())])
-        }
-    }
-
-    impl ProcessSeedPort for FakeProcessSeedPort {
-        fn seed_from_task_iter(
-            &mut self,
-            pid_roots: &[u32],
-            tty_filters: &HashSet<String>,
-            watch_flags: u32,
-        ) -> anyhow::Result<Vec<u32>> {
-            self.task_iter_calls
-                .push((pid_roots.to_vec(), tty_filters.clone(), watch_flags));
-            self.results
-                .pop_front()
-                .unwrap_or_else(|| Ok(Vec::new()))
-        }
-
-        fn seed_direct(&mut self, pids: &[u32], flags: u32) -> anyhow::Result<()> {
-            self.direct_calls.push((pids.to_vec(), flags));
-            Ok(())
-        }
-    }
-
-    #[derive(Default)]
-    struct FakeReporter {
-        warnings: Vec<String>,
-        infos: Vec<String>,
-    }
-
-    impl StatusReporter for FakeReporter {
-        fn info(&mut self, message: String) {
-            self.infos.push(message);
-        }
-
-        fn warn(&mut self, message: String) {
-            self.warnings.push(message);
-        }
-    }
-
-    #[derive(Default)]
-    struct FakeWaitPort {
-        calls: Vec<String>,
-    }
-
-    impl WaitPort for FakeWaitPort {
-        fn wait<'a>(
-            &'a mut self,
-            _duration: std::time::Duration,
-            interrupted_message: String,
-        ) -> BoxFuture<'a, anyhow::Result<()>> {
-            Box::pin(async move {
-                self.calls.push(interrupted_message);
-                Ok(())
-            })
-        }
-    }
-
-    struct FakeCgroupPort {
-        procs: Vec<u32>,
-    }
-
-    impl crate::usecase::port::CgroupPort for FakeCgroupPort {
-        fn read_cgroup_v2_path(&self, _pid: u32) -> anyhow::Result<String> {
-            Ok("/demo".to_string())
-        }
-
-        fn read_cgroup_procs(&self, _path: &str) -> anyhow::Result<Vec<u32>> {
-            Ok(self.procs.clone())
-        }
-    }
-
-    struct FakeContainerRuntimePort {
-        pids: Mutex<VecDeque<anyhow::Result<Option<u32>>>>,
-    }
-
-    impl FakeContainerRuntimePort {
-        fn new(pids: Vec<anyhow::Result<Option<u32>>>) -> Self {
-            Self {
-                pids: Mutex::new(pids.into()),
-            }
-        }
-    }
-
-    impl ContainerRuntimePort for FakeContainerRuntimePort {
-        fn query_main_pid<'a>(
-            &'a self,
-            _name_or_id: &'a str,
-        ) -> BoxFuture<'a, anyhow::Result<Option<u32>>> {
-            Box::pin(async move {
-                self.pids
-                    .lock()
-                    .unwrap()
-                    .pop_front()
-                    .unwrap_or(Ok(None))
-            })
-        }
-
-        fn spawn_monitor(
-            &self,
-            _name_or_id: String,
-            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
-            _index: usize,
-        ) -> tokio::task::JoinHandle<()> {
-            tokio::spawn(async {})
-        }
-    }
-
-    #[derive(Clone)]
-    struct FakeSystemdRuntimePort {
-        statuses: Arc<Mutex<VecDeque<anyhow::Result<SystemdUnitRuntimeStatus>>>>,
-    }
-
-    impl FakeSystemdRuntimePort {
-        fn new(statuses: Vec<anyhow::Result<SystemdUnitRuntimeStatus>>) -> Self {
-            Self {
-                statuses: Arc::new(Mutex::new(statuses.into())),
-            }
-        }
-    }
-
-    impl SystemdRuntimePort for FakeSystemdRuntimePort {
-        fn current_status<'a>(
-            &'a self,
-            _unit_name: &'a str,
-        ) -> BoxFuture<'a, anyhow::Result<SystemdUnitRuntimeStatus>> {
-            Box::pin(async move {
-                self.statuses
-                    .lock()
-                    .unwrap()
-                    .pop_front()
-                    .unwrap_or_else(|| Ok(SystemdUnitRuntimeStatus::missing()))
-            })
-        }
-
-        fn unit_pids<'a>(
-            &'a self,
-            _unit_name: &'a str,
-        ) -> BoxFuture<'a, anyhow::Result<Vec<u32>>> {
-            Box::pin(async { Ok(vec![11, 22]) })
-        }
-
-        fn spawn_monitor(
-            &self,
-            _unit_name: String,
-            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
-            _index: usize,
-        ) -> tokio::task::JoinHandle<()> {
-            tokio::spawn(async {})
-        }
-    }
+    use crate::usecase::port::SystemdUnitRuntimeStatus;
 
     #[tokio::test]
     async fn collect_static_watch_roots_returns_empty_without_inputs() {
-        let mut process_seed = FakeProcessSeedPort::default();
-        let mut reporter = FakeReporter::default();
-        let mut wait_port = FakeWaitPort::default();
+        let mut process_seed = MockProcessSeedPort::new();
+        let mut reporter = MockStatusReporter::new();
+        let mut wait_port = MockWaitPort::new();
 
         let roots = collect_static_watch_roots(
             &mut process_seed,
@@ -385,15 +216,35 @@ mod tests {
         .unwrap();
 
         assert!(roots.is_empty());
-        assert!(process_seed.task_iter_calls.is_empty());
     }
 
     #[tokio::test]
     async fn collect_static_watch_roots_waits_when_no_runtime_targets_and_first_seed_is_empty() {
-        let mut process_seed =
-            FakeProcessSeedPort::with_results(vec![Ok(Vec::new()), Ok(Vec::new()), Ok(vec![41])]);
-        let mut reporter = FakeReporter::default();
-        let mut wait_port = FakeWaitPort::default();
+        let results = Arc::new(Mutex::new(VecDeque::from([
+            Ok(Vec::new()),
+            Ok(Vec::new()),
+            Ok(vec![41]),
+        ])));
+        let mut process_seed = MockProcessSeedPort::new();
+        process_seed
+            .expect_seed_from_task_iter()
+            .times(3)
+            .returning({
+                let results = Arc::clone(&results);
+                move |pid_roots, tty_filters, watch_flags| {
+                    assert_eq!(pid_roots, [41]);
+                    assert!(tty_filters.is_empty());
+                    assert_eq!(watch_flags, 0x2);
+                    results.lock().unwrap().pop_front().unwrap()
+                }
+            });
+        let mut reporter = MockStatusReporter::new();
+        reporter.expect_warn().times(1).return_const(());
+        let mut wait_port = MockWaitPort::new();
+        wait_port
+            .expect_wait()
+            .times(1)
+            .returning(|_, _| boxed_future(Ok(())));
 
         let roots = collect_static_watch_roots(
             &mut process_seed,
@@ -409,16 +260,32 @@ mod tests {
         .unwrap();
 
         assert_eq!(roots, StdHashMap::from([(41, 0x2)]));
-        assert_eq!(wait_port.calls.len(), 1);
-        assert_eq!(reporter.warnings.len(), 1);
     }
 
     #[tokio::test]
     async fn initialize_container_runtimes_forces_watch_children_for_all_processes() {
-        let mut process_seed = FakeProcessSeedPort::default();
-        let cgroup_port: SharedCgroupPort = Arc::new(FakeCgroupPort { procs: vec![50, 51] });
-        let runtime: SharedContainerRuntimePort = Arc::new(FakeContainerRuntimePort::new(vec![Ok(Some(50))]));
-        let mut reporter = FakeReporter::default();
+        let mut process_seed = MockProcessSeedPort::new();
+        process_seed
+            .expect_seed_direct()
+            .times(1)
+            .withf(|pids, flags| {
+                pids == [50, 51] && *flags == (PROC_FLAG_WATCH_SELF | PROC_FLAG_WATCH_CHILDREN)
+            })
+            .returning(|_, _| Ok(()));
+        let mut cgroup_port = MockCgroupPort::new();
+        cgroup_port
+            .expect_read_cgroup_v2_path()
+            .times(1)
+            .withf(|pid| *pid == 50)
+            .returning(|_| Ok("/demo".to_string()));
+        cgroup_port
+            .expect_read_cgroup_procs()
+            .times(1)
+            .withf(|path| path == "/demo")
+            .returning(|_| Ok(vec![50, 51]));
+        let cgroup_port: SharedCgroupPort = Arc::new(cgroup_port);
+        let runtime: SharedContainerRuntimePort = Arc::new(QueuedContainerRuntimePort::new(vec![Ok(Some(50))]));
+        let mut reporter = MockStatusReporter::new();
 
         let runtimes = initialize_container_runtimes(
             &mut process_seed,
@@ -436,18 +303,14 @@ mod tests {
         assert!(runtimes[0].watch_children);
         assert!(runtimes[0].all_processes);
         assert_eq!(runtimes[0].current_pid, Some(50));
-        assert_eq!(
-            process_seed.direct_calls,
-            vec![(vec![50, 51], PROC_FLAG_WATCH_SELF | PROC_FLAG_WATCH_CHILDREN)]
-        );
     }
 
     #[tokio::test]
     async fn initialize_container_runtimes_skips_seed_when_runtime_has_no_pid() {
-        let mut process_seed = FakeProcessSeedPort::default();
-        let cgroup_port: SharedCgroupPort = Arc::new(FakeCgroupPort { procs: vec![99] });
-        let runtime: SharedContainerRuntimePort = Arc::new(FakeContainerRuntimePort::new(vec![Ok(None)]));
-        let mut reporter = FakeReporter::default();
+        let mut process_seed = MockProcessSeedPort::new();
+        let cgroup_port: SharedCgroupPort = Arc::new(MockCgroupPort::new());
+        let runtime: SharedContainerRuntimePort = Arc::new(QueuedContainerRuntimePort::new(vec![Ok(None)]));
+        let mut reporter = MockStatusReporter::new();
 
         let runtimes = initialize_container_runtimes(
             &mut process_seed,
@@ -462,14 +325,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(runtimes[0].current_pid, None);
-        assert!(process_seed.direct_calls.is_empty());
-        assert!(process_seed.task_iter_calls.is_empty());
     }
 
     #[tokio::test]
     async fn initialize_systemd_runtimes_waits_for_running_unit_and_seeds_main_pid() {
-        let mut process_seed = FakeProcessSeedPort::default();
-        let runtime: SharedSystemdRuntimePort = Arc::new(FakeSystemdRuntimePort::new(vec![
+        let statuses = vec![
             Ok(SystemdUnitRuntimeStatus {
                 exists: true,
                 active_state: Some("inactive".to_string()),
@@ -488,9 +348,21 @@ mod tests {
                 sub_state: Some("running".to_string()),
                 main_pid: Some(80),
             }),
-        ]));
-        let mut reporter = FakeReporter::default();
-        let mut wait_port = FakeWaitPort::default();
+        ];
+        let mut process_seed = MockProcessSeedPort::new();
+        process_seed
+            .expect_seed_direct()
+            .times(1)
+            .withf(|pids, flags| pids == [80] && *flags == PROC_FLAG_WATCH_SELF)
+            .returning(|_, _| Ok(()));
+        let runtime: SharedSystemdRuntimePort = Arc::new(QueuedSystemdRuntimePort::with_statuses(statuses));
+        let mut reporter = MockStatusReporter::new();
+        reporter.expect_info().times(1).return_const(());
+        let mut wait_port = MockWaitPort::new();
+        wait_port
+            .expect_wait()
+            .times(1)
+            .returning(|_, _| boxed_future(Ok(())));
 
         let runtimes = initialize_systemd_runtimes(
             &mut process_seed,
@@ -507,18 +379,14 @@ mod tests {
         assert_eq!(runtimes.len(), 1);
         assert_eq!(runtimes[0].current_pid, Some(80));
         assert!(runtimes[0].current_running);
-        assert_eq!(process_seed.direct_calls, vec![(vec![80], PROC_FLAG_WATCH_SELF)]);
-        assert_eq!(wait_port.calls.len(), 1);
     }
 
     #[tokio::test]
     async fn initialize_systemd_runtimes_keeps_missing_unit_stopped_without_seeding() {
-        let mut process_seed = FakeProcessSeedPort::default();
-        let runtime: SharedSystemdRuntimePort = Arc::new(FakeSystemdRuntimePort::new(vec![Ok(
-            SystemdUnitRuntimeStatus::missing(),
-        )]));
-        let mut reporter = FakeReporter::default();
-        let mut wait_port = FakeWaitPort::default();
+        let mut process_seed = MockProcessSeedPort::new();
+        let runtime: SharedSystemdRuntimePort = Arc::new(QueuedSystemdRuntimePort::with_statuses(vec![Ok(SystemdUnitRuntimeStatus::missing())]));
+        let mut reporter = MockStatusReporter::new();
+        let mut wait_port = MockWaitPort::new();
 
         let runtimes = initialize_systemd_runtimes(
             &mut process_seed,
@@ -535,7 +403,5 @@ mod tests {
         assert_eq!(runtimes.len(), 1);
         assert!(!runtimes[0].current_running);
         assert_eq!(runtimes[0].current_pid, None);
-        assert!(process_seed.direct_calls.is_empty());
-        assert!(process_seed.task_iter_calls.is_empty());
     }
 }

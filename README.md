@@ -65,6 +65,9 @@ Unit tests:
 cargo test -p tracepoint-demo --lib
 ```
 
+The crate keeps shared test support in `tracepoint-demo/src/test_support.rs` so repeated fakes
+stay consistent across policy and orchestration tests.
+
 Static checks:
 
 ```bash

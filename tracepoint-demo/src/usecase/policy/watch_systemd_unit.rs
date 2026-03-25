@@ -164,157 +164,13 @@ pub fn spawn_monitors(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::{HashSet, VecDeque},
-        sync::{Arc, Mutex},
-    };
+    use std::sync::Arc;
 
     use super::*;
-    use crate::usecase::port::BoxFuture;
-
-    struct FakeProcessSeedPort {
-        direct_calls: Mutex<Vec<(Vec<u32>, u32)>>,
-        task_iter_calls: Mutex<Vec<(Vec<u32>, HashSet<String>, u32)>>,
-        task_iter_result: Mutex<anyhow::Result<Vec<u32>>>,
-        direct_result: Mutex<anyhow::Result<()>>,
-    }
-
-    impl FakeProcessSeedPort {
-        fn with_results(
-            task_iter_result: anyhow::Result<Vec<u32>>,
-            direct_result: anyhow::Result<()>,
-        ) -> Self {
-            Self {
-                direct_calls: Mutex::new(Vec::new()),
-                task_iter_calls: Mutex::new(Vec::new()),
-                task_iter_result: Mutex::new(task_iter_result),
-                direct_result: Mutex::new(direct_result),
-            }
-        }
-    }
-
-    impl Default for FakeProcessSeedPort {
-        fn default() -> Self {
-            Self::with_results(Ok(Vec::new()), Ok(()))
-        }
-    }
-
-    impl ProcessSeedPort for FakeProcessSeedPort {
-        fn seed_from_task_iter(
-            &mut self,
-            pid_roots: &[u32],
-            tty_filters: &HashSet<String>,
-            watch_flags: u32,
-        ) -> anyhow::Result<Vec<u32>> {
-            self.task_iter_calls.lock().unwrap().push((
-                pid_roots.to_vec(),
-                tty_filters.clone(),
-                watch_flags,
-            ));
-            match &*self.task_iter_result.lock().unwrap() {
-                Ok(roots) => Ok(roots.clone()),
-                Err(err) => Err(anyhow::anyhow!(err.to_string())),
-            }
-        }
-
-        fn seed_direct(&mut self, pids: &[u32], flags: u32) -> anyhow::Result<()> {
-            self.direct_calls
-                .lock()
-                .unwrap()
-                .push((pids.to_vec(), flags));
-            match &*self.direct_result.lock().unwrap() {
-                Ok(()) => Ok(()),
-                Err(err) => Err(anyhow::anyhow!(err.to_string())),
-            }
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct FakeSystemdRuntimePort {
-        statuses: Arc<Mutex<VecDeque<SystemdUnitRuntimeStatus>>>,
-    }
-
-    impl FakeSystemdRuntimePort {
-        fn new(statuses: Vec<SystemdUnitRuntimeStatus>) -> Self {
-            Self {
-                statuses: Arc::new(Mutex::new(statuses.into_iter().collect())),
-            }
-        }
-    }
-
-    impl SystemdRuntimePort for FakeSystemdRuntimePort {
-        fn current_status<'a>(
-            &'a self,
-            _unit_name: &'a str,
-        ) -> BoxFuture<'a, anyhow::Result<SystemdUnitRuntimeStatus>> {
-            Box::pin(async move {
-                let mut statuses = self.statuses.lock().expect("status queue should be usable");
-                if let Some(status) = statuses.pop_front() {
-                    Ok(status)
-                } else if let Some(status) = statuses.back() {
-                    Ok(status.clone())
-                } else {
-                    Err(anyhow::anyhow!("status queue is empty"))
-                }
-            })
-        }
-
-        fn unit_pids<'a>(&'a self, _unit_name: &'a str) -> BoxFuture<'a, anyhow::Result<Vec<u32>>> {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn spawn_monitor(
-            &self,
-            _unit_name: String,
-            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
-            _index: usize,
-        ) -> tokio::task::JoinHandle<()> {
-            tokio::spawn(async {})
-        }
-    }
-
-    #[derive(Default)]
-    struct FakeReporter {
-        info_messages: Vec<String>,
-        warn_messages: Vec<String>,
-    }
-
-    impl StatusReporter for FakeReporter {
-        fn info(&mut self, message: String) {
-            self.info_messages.push(message);
-        }
-
-        fn warn(&mut self, message: String) {
-            self.warn_messages.push(message);
-        }
-    }
-
-    #[derive(Default)]
-    struct FakeWaitPort {
-        calls: Vec<(Duration, String)>,
-        fail_on_call: Option<usize>,
-    }
-
-    impl WaitPort for FakeWaitPort {
-        fn wait<'a>(
-            &'a mut self,
-            duration: Duration,
-            interrupted_message: String,
-        ) -> BoxFuture<'a, anyhow::Result<()>> {
-            Box::pin(async move {
-                self.calls.push((duration, interrupted_message));
-                if self
-                    .fail_on_call
-                    .map(|fail_on_call| self.calls.len() >= fail_on_call)
-                    .unwrap_or(false)
-                {
-                    return Err(anyhow::anyhow!("wait interrupted"));
-                }
-
-                Ok(())
-            })
-        }
-    }
+    use crate::test_support::{
+        boxed_future, MockProcessSeedPort, MockStatusReporter, MockWaitPort,
+        NoopSystemdRuntimePort, QueuedSystemdRuntimePort,
+    };
 
     #[tokio::test]
     async fn spawn_monitors_empty_returns_empty() {
@@ -325,14 +181,14 @@ mod tests {
 
     #[tokio::test]
     async fn wait_systemd_unit_running_returns_immediately_when_running() {
-        let runtime = FakeSystemdRuntimePort::new(vec![SystemdUnitRuntimeStatus {
+        let runtime = QueuedSystemdRuntimePort::with_statuses(vec![Ok(SystemdUnitRuntimeStatus {
             exists: true,
             active_state: Some("active".to_string()),
             sub_state: Some("running".to_string()),
             main_pid: Some(123),
-        }]);
-        let mut reporter = FakeReporter::default();
-        let mut wait_port = FakeWaitPort::default();
+        })]);
+        let mut reporter = MockStatusReporter::new();
+        let mut wait_port = MockWaitPort::new();
 
         let status =
             wait_systemd_unit_running(&runtime, &mut reporter, &mut wait_port, "demo.service")
@@ -340,13 +196,11 @@ mod tests {
                 .unwrap();
 
         assert_eq!(status.main_pid, Some(123));
-        assert!(reporter.info_messages.is_empty());
-        assert!(wait_port.calls.is_empty());
     }
 
     #[tokio::test]
     async fn wait_systemd_unit_running_announces_once_until_running() {
-        let runtime = FakeSystemdRuntimePort::new(vec![
+        let runtime = QueuedSystemdRuntimePort::with_statuses(vec![
             SystemdUnitRuntimeStatus {
                 exists: true,
                 active_state: Some("inactive".to_string()),
@@ -365,9 +219,26 @@ mod tests {
                 sub_state: Some("running".to_string()),
                 main_pid: Some(456),
             },
-        ]);
-        let mut reporter = FakeReporter::default();
-        let mut wait_port = FakeWaitPort::default();
+        ]
+        .into_iter()
+        .map(Ok)
+        .collect());
+        let mut reporter = MockStatusReporter::new();
+        reporter
+            .expect_info()
+            .times(1)
+            .withf(|message| message.contains("Waiting for systemd unit demo.service to start"))
+            .return_const(());
+        let mut wait_port = MockWaitPort::new();
+        wait_port
+            .expect_wait()
+            .times(2)
+            .withf(|duration, interrupted_message| {
+                *duration == Duration::from_secs(1)
+                    && interrupted_message
+                        == "Interrupted while waiting for systemd unit demo.service state to change."
+            })
+            .returning(|_, _| boxed_future(Ok(())));
 
         let status =
             wait_systemd_unit_running(&runtime, &mut reporter, &mut wait_port, "demo.service")
@@ -375,21 +246,27 @@ mod tests {
                 .unwrap();
 
         assert_eq!(status.main_pid, Some(456));
-        assert_eq!(reporter.info_messages.len(), 1);
-        assert!(
-            reporter.info_messages[0].contains("Waiting for systemd unit demo.service to start")
-        );
-        assert_eq!(wait_port.calls.len(), 2);
     }
 
     #[tokio::test]
     async fn wait_systemd_unit_running_reports_missing_unit_and_propagates_wait_error() {
-        let runtime = FakeSystemdRuntimePort::new(vec![SystemdUnitRuntimeStatus::missing()]);
-        let mut reporter = FakeReporter::default();
-        let mut wait_port = FakeWaitPort {
-            calls: Vec::new(),
-            fail_on_call: Some(1),
-        };
+        let runtime = QueuedSystemdRuntimePort::with_statuses(vec![Ok(SystemdUnitRuntimeStatus::missing())]);
+        let mut reporter = MockStatusReporter::new();
+        reporter
+            .expect_info()
+            .times(1)
+            .withf(|message| message == "Waiting for systemd unit demo.service to exist...")
+            .return_const(());
+        let mut wait_port = MockWaitPort::new();
+        wait_port
+            .expect_wait()
+            .times(1)
+            .withf(|duration, interrupted_message| {
+                *duration == Duration::from_secs(1)
+                    && interrupted_message
+                        == "Interrupted while waiting for systemd unit demo.service state to change."
+            })
+            .returning(|_, _| boxed_future(Err(anyhow::anyhow!("wait interrupted"))));
 
         let err =
             wait_systemd_unit_running(&runtime, &mut reporter, &mut wait_port, "demo.service")
@@ -397,18 +274,18 @@ mod tests {
                 .unwrap_err();
 
         assert_eq!(err.to_string(), "wait interrupted");
-        assert_eq!(
-            reporter.info_messages,
-            vec!["Waiting for systemd unit demo.service to exist...".to_string()]
-        );
-        assert_eq!(wait_port.calls.len(), 1);
     }
 
     #[tokio::test]
     async fn seed_systemd_unit_processes_seeds_directly_for_all_processes() {
-        let mut process_seed = FakeProcessSeedPort::with_results(Ok(Vec::new()), Ok(()));
-        let runtime = FixedUnitPidsRuntimePort { pids: vec![11, 22] };
-        let mut reporter = FakeReporter::default();
+        let mut process_seed = MockProcessSeedPort::new();
+        process_seed
+            .expect_seed_direct()
+            .times(1)
+            .withf(|pids, flags| pids == [11, 22] && *flags == 0x4)
+            .returning(|_, _| Ok(()));
+        let runtime = QueuedSystemdRuntimePort::with_unit_pids_result(Ok(vec![11, 22]));
+        let mut reporter = MockStatusReporter::new();
 
         seed_systemd_unit_processes(
             &mut process_seed,
@@ -424,19 +301,21 @@ mod tests {
         )
         .await
         .unwrap();
-
-        assert_eq!(
-            process_seed.direct_calls.lock().unwrap().clone(),
-            vec![(vec![11, 22], 0x4)]
-        );
-        assert!(process_seed.task_iter_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn seed_systemd_unit_processes_falls_back_to_task_iter_when_unit_pids_fail() {
-        let mut process_seed = FakeProcessSeedPort::with_results(Ok(vec![77]), Ok(()));
-        let runtime = FailingUnitPidsRuntimePort;
-        let mut reporter = FakeReporter::default();
+        let mut process_seed = MockProcessSeedPort::new();
+        process_seed
+            .expect_seed_from_task_iter()
+            .times(1)
+            .withf(|pid_roots, tty_filters, watch_flags| {
+                pid_roots == [77] && tty_filters.is_empty() && *watch_flags == 0x8
+            })
+            .returning(|_, _, _| Ok(vec![77]));
+        let runtime = QueuedSystemdRuntimePort::with_unit_pids_result(Err(anyhow::anyhow!("unit pids unavailable")));
+        let mut reporter = MockStatusReporter::new();
+        reporter.expect_warn().times(1).return_const(());
 
         seed_systemd_unit_processes(
             &mut process_seed,
@@ -452,17 +331,13 @@ mod tests {
         )
         .await
         .unwrap();
-
-        assert!(process_seed.direct_calls.lock().unwrap().is_empty());
-        assert_eq!(process_seed.task_iter_calls.lock().unwrap().len(), 1);
-        assert_eq!(reporter.warn_messages.len(), 1);
     }
 
     #[tokio::test]
     async fn apply_systemd_runtime_update_short_circuits_when_state_is_unchanged() {
-        let mut process_seed = FakeProcessSeedPort::default();
+        let mut process_seed = MockProcessSeedPort::new();
         let mut runtime = SystemdRuntime {
-            runtime: Arc::new(FakeSystemdRuntimePort::default()),
+            runtime: Arc::new(NoopSystemdRuntimePort),
             unit_name: "demo.service".to_string(),
             watch_children: false,
             all_processes: false,
@@ -470,7 +345,7 @@ mod tests {
             current_pid: Some(12),
             current_running: true,
         };
-        let mut reporter = FakeReporter::default();
+        let mut reporter = MockStatusReporter::new();
 
         apply_systemd_runtime_update(
             &mut process_seed,
@@ -481,16 +356,13 @@ mod tests {
         )
         .await
         .unwrap();
-
-        assert!(process_seed.direct_calls.lock().unwrap().is_empty());
-        assert!(process_seed.task_iter_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn seed_systemd_unit_processes_errors_when_active_unit_has_no_main_pid() {
-        let mut process_seed = FakeProcessSeedPort::default();
-        let runtime = FixedUnitPidsRuntimePort { pids: vec![1, 2] };
-        let mut reporter = FakeReporter::default();
+        let mut process_seed = MockProcessSeedPort::new();
+        let runtime = NoopSystemdRuntimePort;
+        let mut reporter = MockStatusReporter::new();
 
         let err = seed_systemd_unit_processes(
             &mut process_seed,
@@ -512,16 +384,14 @@ mod tests {
 
     #[tokio::test]
     async fn apply_systemd_runtime_update_seeds_and_updates_state_when_running_changes() {
-        let mut process_seed = FakeProcessSeedPort::with_results(Ok(Vec::new()), Ok(()));
+        let mut process_seed = MockProcessSeedPort::new();
+        process_seed
+            .expect_seed_direct()
+            .times(1)
+            .withf(|pids, flags| pids == [88] && *flags == 0x2)
+            .returning(|_, _| Ok(()));
         let mut runtime = SystemdRuntime {
-            runtime: Arc::new(FixedStatusRuntimePort {
-                status: SystemdUnitRuntimeStatus {
-                    exists: true,
-                    active_state: Some("active".to_string()),
-                    sub_state: Some("running".to_string()),
-                    main_pid: Some(88),
-                },
-            }),
+            runtime: Arc::new(NoopSystemdRuntimePort),
             unit_name: "demo.service".to_string(),
             watch_children: false,
             all_processes: false,
@@ -529,7 +399,7 @@ mod tests {
             current_pid: None,
             current_running: false,
         };
-        let mut reporter = FakeReporter::default();
+        let mut reporter = MockStatusReporter::new();
 
         apply_systemd_runtime_update(
             &mut process_seed,
@@ -543,87 +413,5 @@ mod tests {
 
         assert_eq!(runtime.current_pid, Some(88));
         assert!(runtime.current_running);
-        assert_eq!(
-            process_seed.direct_calls.lock().unwrap().clone(),
-            vec![(vec![88], 0x2)]
-        );
-    }
-
-    struct FixedUnitPidsRuntimePort {
-        pids: Vec<u32>,
-    }
-
-    impl SystemdRuntimePort for FixedUnitPidsRuntimePort {
-        fn current_status<'a>(
-            &'a self,
-            _unit_name: &'a str,
-        ) -> BoxFuture<'a, anyhow::Result<SystemdUnitRuntimeStatus>> {
-            Box::pin(async { Ok(SystemdUnitRuntimeStatus::missing()) })
-        }
-
-        fn unit_pids<'a>(&'a self, _unit_name: &'a str) -> BoxFuture<'a, anyhow::Result<Vec<u32>>> {
-            let pids = self.pids.clone();
-            Box::pin(async move { Ok(pids) })
-        }
-
-        fn spawn_monitor(
-            &self,
-            _unit_name: String,
-            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
-            _index: usize,
-        ) -> tokio::task::JoinHandle<()> {
-            tokio::spawn(async {})
-        }
-    }
-
-    struct FailingUnitPidsRuntimePort;
-
-    impl SystemdRuntimePort for FailingUnitPidsRuntimePort {
-        fn current_status<'a>(
-            &'a self,
-            _unit_name: &'a str,
-        ) -> BoxFuture<'a, anyhow::Result<SystemdUnitRuntimeStatus>> {
-            Box::pin(async { Ok(SystemdUnitRuntimeStatus::missing()) })
-        }
-
-        fn unit_pids<'a>(&'a self, _unit_name: &'a str) -> BoxFuture<'a, anyhow::Result<Vec<u32>>> {
-            Box::pin(async { Err(anyhow::anyhow!("unit pids unavailable")) })
-        }
-
-        fn spawn_monitor(
-            &self,
-            _unit_name: String,
-            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
-            _index: usize,
-        ) -> tokio::task::JoinHandle<()> {
-            tokio::spawn(async {})
-        }
-    }
-
-    struct FixedStatusRuntimePort {
-        status: SystemdUnitRuntimeStatus,
-    }
-
-    impl SystemdRuntimePort for FixedStatusRuntimePort {
-        fn current_status<'a>(
-            &'a self,
-            _unit_name: &'a str,
-        ) -> BoxFuture<'a, anyhow::Result<SystemdUnitRuntimeStatus>> {
-            let status = self.status.clone();
-            Box::pin(async move { Ok(status) })
-        }
-
-        fn unit_pids<'a>(&'a self, _unit_name: &'a str) -> BoxFuture<'a, anyhow::Result<Vec<u32>>> {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn spawn_monitor(
-            &self,
-            _unit_name: String,
-            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
-            _index: usize,
-        ) -> tokio::task::JoinHandle<()> {
-            tokio::spawn(async {})
-        }
     }
 }

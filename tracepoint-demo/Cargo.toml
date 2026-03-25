@@ -26,6 +26,10 @@ tokio = { workspace = true, features = [
 zbus = { version = "5.14", features = ["tokio"] }
 zbus_systemd = { version = "0.25901", features = ["systemd1"] }
 clap = { workspace = true, features = ["derive", "help", "usage"] }
+
+[dev-dependencies]
+mockall = "0.14.0"
+
 [build-dependencies]
 anyhow = { workspace = true }
 aya-build = { workspace = true }

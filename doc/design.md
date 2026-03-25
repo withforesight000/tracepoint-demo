@@ -130,6 +130,11 @@ In other words, `infra` is where program initialization belongs.
 - `orchestration/`: internal usecase coordination helpers for multi-step flows that are still part
   of usecase behavior
 
+Crate-local unit tests now share `tracepoint-demo/src/test_support.rs` for reusable mocks and test
+fakes. `mockall` is used where it makes the tests simpler, while runtime ports that return
+`BoxFuture<'a, ...>` still use shared manual fakes because that shape does not fit `mockall`
+cleanly in this codebase.
+
 The key rule is that `usecase/orchestration/` is not the place for whole-program initialization.
 Initialization belongs to `infra/`. Orchestration exists only to keep individual
 usecases small when they need internal step decomposition.

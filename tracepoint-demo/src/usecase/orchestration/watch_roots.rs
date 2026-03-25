@@ -104,57 +104,12 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::usecase::{
+    use crate::{
+        test_support::{NoopContainerRuntimePort, NoopSystemdRuntimePort},
+        usecase::{
         policy::{watch_container::ContainerRuntime, watch_systemd_unit::SystemdRuntime},
-        port::{
-            BoxFuture, ContainerRuntimePort, RuntimeUpdate, SystemdRuntimePort,
-            SystemdUnitRuntimeStatus,
         },
     };
-
-    struct FakeContainerRuntimePort;
-
-    impl ContainerRuntimePort for FakeContainerRuntimePort {
-        fn query_main_pid<'a>(
-            &'a self,
-            _name_or_id: &'a str,
-        ) -> BoxFuture<'a, anyhow::Result<Option<u32>>> {
-            Box::pin(async { Ok(None) })
-        }
-
-        fn spawn_monitor(
-            &self,
-            _name_or_id: String,
-            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
-            _index: usize,
-        ) -> tokio::task::JoinHandle<()> {
-            tokio::spawn(async {})
-        }
-    }
-
-    struct FakeSystemdRuntimePort;
-
-    impl SystemdRuntimePort for FakeSystemdRuntimePort {
-        fn current_status<'a>(
-            &'a self,
-            _unit_name: &'a str,
-        ) -> BoxFuture<'a, anyhow::Result<SystemdUnitRuntimeStatus>> {
-            Box::pin(async { Ok(SystemdUnitRuntimeStatus::missing()) })
-        }
-
-        fn unit_pids<'a>(&'a self, _unit_name: &'a str) -> BoxFuture<'a, anyhow::Result<Vec<u32>>> {
-            Box::pin(async { Ok(Vec::new()) })
-        }
-
-        fn spawn_monitor(
-            &self,
-            _unit_name: String,
-            _tx: tokio::sync::mpsc::UnboundedSender<RuntimeUpdate>,
-            _index: usize,
-        ) -> tokio::task::JoinHandle<()> {
-            tokio::spawn(async {})
-        }
-    }
 
     #[test]
     fn add_watch_root_sets_and_merges_flags() {
@@ -191,7 +146,7 @@ mod tests {
         let container_runtimes = vec![
             ContainerRuntime {
                 cgroup_port: Arc::new(crate::gateway::procfs::ProcfsCgroupPort),
-                runtime: Arc::new(FakeContainerRuntimePort),
+                runtime: Arc::new(NoopContainerRuntimePort),
                 name_or_id: "web".to_string(),
                 watch_children: true,
                 all_processes: false,
@@ -200,7 +155,7 @@ mod tests {
             },
             ContainerRuntime {
                 cgroup_port: Arc::new(crate::gateway::procfs::ProcfsCgroupPort),
-                runtime: Arc::new(FakeContainerRuntimePort),
+                runtime: Arc::new(NoopContainerRuntimePort),
                 name_or_id: "worker".to_string(),
                 watch_children: false,
                 all_processes: false,
@@ -210,7 +165,7 @@ mod tests {
         ];
 
         let systemd_runtimes = vec![SystemdRuntime {
-            runtime: Arc::new(FakeSystemdRuntimePort),
+            runtime: Arc::new(NoopSystemdRuntimePort),
             unit_name: "sshd.service".to_string(),
             watch_children: false,
             all_processes: false,
