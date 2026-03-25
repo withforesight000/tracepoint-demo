@@ -1,13 +1,9 @@
-use aya::Ebpf;
 use tokio::sync::mpsc;
 
 use crate::usecase::{
-    orchestration::{
-        startup,
-        state::{AppState, PreparedApp},
-    },
+    orchestration::state::AppState,
     policy::{watch_container, watch_systemd_unit},
-    port::{RuntimeUpdate, SharedContainerRuntimePort, SharedSystemdRuntimePort, StatusReporter, WaitPort},
+    port::RuntimeUpdate,
 };
 
 pub struct TraceRequest {
@@ -18,21 +14,6 @@ pub struct TraceRequest {
     pub systemd_units: Vec<String>,
     pub all_systemd_processes: bool,
     pub watch_children: bool,
-}
-
-pub struct StartupResources {
-    pub ebpf: Ebpf,
-    pub container_runtime: Option<SharedContainerRuntimePort>,
-    pub systemd_runtime: Option<SharedSystemdRuntimePort>,
-}
-
-pub async fn prepare<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized>(
-    request: TraceRequest,
-    resources: StartupResources,
-    reporter: &mut TReporter,
-    wait_port: &mut TWait,
-) -> anyhow::Result<PreparedApp> {
-    startup::prepare(request, resources, reporter, wait_port).await
 }
 
 pub fn spawn_monitors(

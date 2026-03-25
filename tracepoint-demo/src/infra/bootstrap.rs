@@ -2,11 +2,12 @@ use clap::Parser;
 
 use crate::{
     gateway::ebpf::load_tracepoint_demo_ebpf,
-    interface::{
-        cli::CliArgs, docker, output::ConsoleStatusReporter, runtime_loop, systemd,
-        wait::SignalAwareWaitPort,
+    infra::{
+        docker,
+        presentation::{cli::CliArgs, output::ConsoleStatusReporter, wait::SignalAwareWaitPort},
+        runtime_loop, startup, systemd,
     },
-    usecase::trace_selected_targets::{self, StartupResources},
+    usecase::policy::trace_selected_targets,
 };
 
 pub async fn run() -> anyhow::Result<()> {
@@ -18,9 +19,9 @@ pub async fn run() -> anyhow::Result<()> {
     let mut reporter = ConsoleStatusReporter;
     let mut wait_port = SignalAwareWaitPort;
 
-    let mut prepared = trace_selected_targets::prepare(
+    let mut prepared = startup::prepare_prepared_app(
         request,
-        StartupResources {
+        startup::StartupResources {
             ebpf,
             container_runtime,
             systemd_runtime,

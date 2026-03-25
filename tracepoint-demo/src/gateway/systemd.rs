@@ -10,9 +10,9 @@ use zbus::fdo::PropertiesProxy;
 use zbus::zvariant::OwnedObjectPath;
 use zbus_systemd::systemd1::{ManagerProxy, ServiceProxy, UnitProxy};
 
-use crate::usecase::{
-    ports::{BoxFuture, SharedSystemdRuntimePort, SystemdRuntimePort, SystemdUnitRuntimeStatus},
-    support::runtime_update::RuntimeUpdate,
+use crate::usecase::port::{
+    BoxFuture, RuntimeUpdate, SharedSystemdRuntimePort, SystemdRuntimePort,
+    SystemdUnitRuntimeStatus,
 };
 
 #[derive(Debug)]

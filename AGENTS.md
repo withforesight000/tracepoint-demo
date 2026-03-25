@@ -22,7 +22,7 @@ Targets can be selected by PID, TTY, Docker container, or systemd unit.
 ## Working rules
 
 - Keep `tracepoint-demo/src/main.rs` as a composition root.
-- Keep CLI parsing, output formatting, runtime-loop wiring, and concrete client initialization in `interface/`.
+- Keep CLI parsing, startup/composition, output formatting, runtime-loop wiring, and concrete client initialization in `infra/`.
 - Keep user-intent flows and watch-state coordination in `usecase/`.
 - Keep eBPF, procfs/cgroup, Docker, and systemd I/O in `gateway/`.
 - Treat `tracepoint-demo-common` as the ABI boundary between userspace and eBPF.
@@ -31,20 +31,20 @@ Targets can be selected by PID, TTY, Docker container, or systemd unit.
 ## Architecture guardrails
 
 - Follow the Dependency Rule strictly: inner layers know ports and request DTOs, not outer-layer module names or concrete library types.
-- `usecase/` must not import `crate::interface::*` and must not depend directly on concrete external client types such as `bollard::Docker` or `zbus::Connection`.
-- `gateway/` must not depend on `interface/`. If a helper is needed by both, move it to `usecase/` or another inner/shared seam only when that dependency direction still makes sense.
+- `usecase/` must not import `crate::infra::*` and must not depend directly on concrete external client types such as `bollard::Docker` or `zbus::Connection`.
+- `gateway/` must not depend on `infra/`. If a helper is needed by both, move it to `usecase/` or another inner/shared seam only when that dependency direction still makes sense.
 - Keep protocol-specific monitoring machinery in `gateway/`. Docker event streams, polling loops, D-Bus subscriptions, `PropertiesProxy`, and similar library/protocol details are gateway concerns, not usecase concerns.
 - Keep user-intent and watch-policy decisions in `usecase/`. If the question is "what should we watch or when should we retry?", it likely belongs in `usecase/`. If the question is "how do we talk to Docker/systemd/eBPF?", it likely belongs in `gateway/`.
-- Keep output and signal handling at the outer edge. User-visible formatting, stdout/stderr writes, Ctrl-C handling, and interruption-aware wait adapters belong in `interface/`.
+- Keep output and signal handling at the outer edge. User-visible formatting, stdout/stderr writes, Ctrl-C handling, and interruption-aware wait adapters belong in `infra/presentation/`.
 - `gateway/` may decode raw events and return data, but it should not own presentation formatting.
-- `usecase/` runtime records may hold ports plus primitive/current state, but should not hold concrete infrastructure clients.
-- Map CLI types to usecase request DTOs in `interface/` before entering `usecase/`.
+- `usecase/orchestration/` runtime records may hold ports plus primitive/current state, but should not hold concrete infrastructure clients.
+- Map CLI types to usecase request DTOs in `infra/presentation/` before entering `usecase/`.
 - When adding a new seam, prefer a port in `usecase/` only if it improves dependency direction, testability, or boundary clarity. Do not introduce traits that merely rename concrete code.
 
 ## Architecture smell checks
 
-- If a `usecase/` file imports `crate::interface::*`, `bollard`, or `zbus`, treat that as a likely architecture regression.
-- If a `gateway/` file imports `crate::interface::*`, treat that as a likely architecture regression.
+- If a `usecase/` file imports `crate::infra::*`, `bollard`, or `zbus`, treat that as a likely architecture regression.
+- If a `gateway/` file imports `crate::infra::*`, treat that as a likely architecture regression.
 - If a `usecase/` or `gateway/` file adds `println!`, `eprintln!`, or `signal::ctrl_c()`, treat that as a likely boundary violation unless there is a very strong reason documented in the change.
 - If Docker/systemd watch code starts to mix retry policy with protocol subscription details in one place, split the policy back to `usecase/` and the I/O mechanics back to `gateway/`.
 

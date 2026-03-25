@@ -7,9 +7,14 @@ use tracepoint_demo_common::{PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF};
 use crate::{
     gateway::ebpf::{build_watch_pids, seed_proc_state_from_task_iter},
     usecase::{
-        orchestration,
+        orchestration::{
+            startup_prepare::{StartupPrepareBackend, StartupPrepareInputs, prepare_runtime_plan},
+            state::{AppState, PreparedApp},
+            tty::normalize_tty_name,
+            watch_roots::{add_watch_root, collect_watch_roots},
+        },
         policy::{
-            trace_selected_targets::{StartupResources, TraceRequest},
+            trace_selected_targets::TraceRequest,
             watch_container::{ContainerRuntime, seed_container_processes},
             watch_pid_or_tty::wait_pid_or_tty_targets,
             watch_systemd_unit::{
@@ -21,12 +26,11 @@ use crate::{
     },
 };
 
-use super::{
-    startup_prepare::{StartupPrepareBackend, StartupPrepareInputs, prepare_runtime_plan},
-    state::{AppState, PreparedApp},
-    tty::normalize_tty_name,
-    watch_roots::add_watch_root,
-};
+pub struct StartupResources {
+    pub ebpf: Ebpf,
+    pub container_runtime: Option<SharedContainerRuntimePort>,
+    pub systemd_runtime: Option<SharedSystemdRuntimePort>,
+}
 
 struct StartupPrepareAdapter<'a, TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> {
     ebpf: &'a mut Ebpf,
@@ -123,11 +127,7 @@ impl<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> StartupPrepar
         container_runtimes: &[Self::ContainerRuntime],
         systemd_runtimes: &[Self::SystemdRuntime],
     ) -> StdHashMap<u32, u32> {
-        orchestration::watch_roots::collect_watch_roots(
-            static_watch_roots,
-            container_runtimes,
-            systemd_runtimes,
-        )
+        collect_watch_roots(static_watch_roots, container_runtimes, systemd_runtimes)
     }
 
     fn collect_target_descriptions(
@@ -301,7 +301,7 @@ async fn initialize_systemd_runtimes<
     Ok(systemd_runtimes)
 }
 
-pub async fn prepare<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized>(
+pub async fn prepare_prepared_app<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized>(
     request: TraceRequest,
     resources: StartupResources,
     reporter: &mut TReporter,
@@ -389,8 +389,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::usecase::{
-        port::{BoxFuture, ContainerRuntimePort, RuntimeUpdate, SystemdRuntimePort, SystemdUnitRuntimeStatus},
+    use crate::usecase::port::{
+        BoxFuture, ContainerRuntimePort, RuntimeUpdate, SystemdRuntimePort,
+        SystemdUnitRuntimeStatus,
     };
 
     struct FakeContainerRuntimePort;

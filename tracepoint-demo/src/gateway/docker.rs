@@ -9,9 +9,8 @@ use bollard::{
 use futures_util::{StreamExt, stream::BoxStream};
 use tokio::{select, sync::mpsc, time::sleep};
 
-use crate::usecase::{
-    ports::{BoxFuture, ContainerRuntimePort, SharedContainerRuntimePort},
-    support::runtime_update::RuntimeUpdate,
+use crate::usecase::port::{
+    BoxFuture, ContainerRuntimePort, RuntimeUpdate, SharedContainerRuntimePort,
 };
 
 struct DockerContainerRuntimeGateway {

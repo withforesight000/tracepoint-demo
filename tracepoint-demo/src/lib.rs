@@ -1,3 +1,3 @@
 pub mod gateway;
-pub mod interface;
+pub mod infra;
 pub mod usecase;

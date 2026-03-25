@@ -16,28 +16,11 @@ use tracepoint_demo_common::{
     EXEC_EVENTS_MAP, ExecEvent, PROC_FLAG_WATCH_CHILDREN, PROC_STATE_MAP, TaskRel, WATCH_PIDS_MAP,
 };
 
-use crate::usecase::support::tty::normalize_tty_name;
+use crate::usecase::orchestration::tty::normalize_tty_name;
 
 pub fn cstr_from_u8(bytes: &[u8]) -> String {
     let len = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..len]).into_owned()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cstr_from_u8_ends_at_nul() {
-        let bytes = b"hello\0world";
-        assert_eq!(cstr_from_u8(bytes), "hello");
-    }
-
-    #[test]
-    fn cstr_from_u8_returns_full_string_no_nul() {
-        let bytes = b"foobar";
-        assert_eq!(cstr_from_u8(bytes), "foobar");
-    }
 }
 
 pub fn drain_exec_events<TEvent, TInvalid>(
@@ -261,4 +244,21 @@ pub fn build_watch_pids(
     }
 
     Ok(watch_pids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cstr_from_u8_ends_at_nul() {
+        let bytes = b"hello\0world";
+        assert_eq!(cstr_from_u8(bytes), "hello");
+    }
+
+    #[test]
+    fn cstr_from_u8_returns_full_string_no_nul() {
+        let bytes = b"foobar";
+        assert_eq!(cstr_from_u8(bytes), "foobar");
+    }
 }

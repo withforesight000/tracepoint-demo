@@ -137,6 +137,7 @@ mod tests {
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct FakeSystemdRuntime(&'static str);
 
+    #[derive(Default)]
     struct FakeStartupPrepareBackend {
         static_watch_roots: StdHashMap<u32, u32>,
         current_watch_roots: StdHashMap<u32, u32>,
@@ -146,21 +147,6 @@ mod tests {
         observed_has_runtime_targets: Vec<bool>,
         container_init_calls: usize,
         systemd_init_calls: usize,
-    }
-
-    impl Default for FakeStartupPrepareBackend {
-        fn default() -> Self {
-            Self {
-                static_watch_roots: StdHashMap::new(),
-                current_watch_roots: StdHashMap::new(),
-                container_runtimes: Vec::new(),
-                systemd_runtimes: Vec::new(),
-                target_descriptions: Vec::new(),
-                observed_has_runtime_targets: Vec::new(),
-                container_init_calls: 0,
-                systemd_init_calls: 0,
-            }
-        }
     }
 
     impl StartupPrepareBackend for FakeStartupPrepareBackend {

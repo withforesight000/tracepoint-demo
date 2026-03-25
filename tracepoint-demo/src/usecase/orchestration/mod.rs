@@ -1,5 +1,3 @@
-pub(crate) mod runtime_update;
-pub(crate) mod startup;
 pub(crate) mod startup_prepare;
 pub(crate) mod state;
 pub(crate) mod tty;

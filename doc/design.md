@@ -2,23 +2,22 @@
 
 ## Purpose
 
-This note describes the current user-space split in `tracepoint-demo`. It is a snapshot of the
-implemented architecture, not a plan for a future rewrite.
+This note describes the agreed user-space architecture for `tracepoint-demo` and the current code
+layout that implements it.
 
-It is also meant to be a reading guide for contributors who do not yet know the repository well.
-If you are opening this project for the first time, this document should help you answer two
-questions quickly:
+It is intentionally both a design note and a reading guide:
 
-- where the main execution path starts
-- which file to open next for the kind of change you want to make
+- it explains the layer boundaries we want to preserve
+- it points at the current files that play each role today
 
 ## First orientation
 
 Before diving into the layers, keep this mental model in mind:
 
 - the CLI chooses target-selection modes such as PID, TTY, container, or systemd unit
-- startup code resolves those selections into an initial watch set
-- runtime monitors keep that watch set up to date while the daemon runs
+- bootstrap code prepares concrete dependencies and starts the runtime
+- usecases decide what should be watched and how updates should be applied
+- gateways talk to eBPF, procfs, Docker, and systemd
 - the eBPF side emits `execve` events for watched processes and userspace prints them
 
 The workspace is split across three crates:
@@ -30,23 +29,138 @@ The workspace is split across three crates:
 If you only want to understand the userspace architecture, start with `tracepoint-demo/` and come
 back to the eBPF crate later.
 
+## Current directory layout
+
+Today, the userspace crate has this directory structure:
+
+```text
+tracepoint-demo/src/
+├── lib.rs
+├── main.rs
+├── gateway/
+│   ├── docker.rs
+│   ├── ebpf.rs
+│   ├── mod.rs
+│   ├── procfs.rs
+│   └── systemd.rs
+├── infra/
+│   ├── bootstrap.rs
+│   ├── docker.rs
+│   ├── mod.rs
+│   ├── runtime_loop.rs
+│   ├── startup.rs
+│   ├── systemd.rs
+│   └── presentation/
+│       ├── cli.rs
+│       ├── mod.rs
+│       ├── output.rs
+│       ├── runtime_update_dispatch.rs
+│       ├── runtime_updates.rs
+│       └── wait.rs
+└── usecase/
+    ├── mod.rs
+    ├── orchestration/
+    │   ├── mod.rs
+    │   ├── startup_prepare.rs
+    │   ├── state.rs
+    │   ├── tty.rs
+    │   └── watch_roots.rs
+    ├── policy/
+    │   ├── mod.rs
+    │   ├── trace_selected_targets.rs
+    │   ├── watch_container.rs
+    │   ├── watch_pid_or_tty.rs
+    │   └── watch_systemd_unit.rs
+    ├── port/
+    │   ├── definitions.rs
+    │   ├── mod.rs
+    │   └── runtime_update.rs
+```
+
+There is also a `tracepoint-demo/src/target/` directory in the workspace at the moment, but that is
+not part of the intended architecture and should be read as incidental build output rather than as
+a design-level module.
+
+## Target layering
+
+The target user-space layering is:
+
+- `main.rs`
+- `infra/`
+- `gateway/`
+- `usecase/`
+
+### `main.rs`
+
+`main.rs` stays tiny. Its job is to initialize logging and hand control to bootstrap.
+
+### `infra/`
+
+`infra` is the outer entry side of the userspace daemon.
+
+- `infra/bootstrap.rs` owns the composition root, concrete dependency creation, startup execution,
+  runtime loop startup, and the top-level wiring between usecases, gateways, and presentation.
+- `infra/startup.rs` owns startup preparation that still needs concrete dependency access but should
+  stay outside the usecase layer.
+- `infra/presentation/` owns user-facing input and output concerns such as CLI parsing, message
+  formatting, signal-aware waits, and other edge adapters.
+
+In other words, `infra` is where program initialization belongs.
+
+### `gateway/`
+
+`gateway` is a top-level layer that owns concrete operations against external systems.
+
+- eBPF loading, attachment, map operations, and ring buffer reads
+- procfs and cgroup file access
+- Docker inspection and monitor loops
+- systemd D-Bus queries and monitor loops
+
+`gateway` implements the traits defined under `usecase/port/`.
+
+### `usecase/`
+
+`usecase` owns user intent and is split into three subareas:
+
+- `policy/`: the user-visible behavior for each target mode
+- `port/`: the traits and related DTOs that describe what the usecases need from the outside world
+- `orchestration/`: internal usecase coordination helpers for multi-step flows that are still part
+  of usecase behavior
+
+The key rule is that `usecase/orchestration/` is not the place for whole-program initialization.
+Initialization belongs to `infra/`. Orchestration exists only to keep individual
+usecases small when they need internal step decomposition.
+
+## Concrete module mapping
+
+The current tree already follows the target layering:
+
+- `infra/bootstrap.rs` is the composition root
+- `infra/startup.rs` holds startup preparation that needs concrete dependencies
+- `infra/runtime_loop.rs` owns the top-level async runtime loop
+- `infra/presentation/*.rs` owns CLI, output, waits, and runtime-update presentation helpers
+- `usecase/port/*.rs` owns the usecase-facing contracts and DTOs
+- `usecase/orchestration/*.rs` owns usecase-internal coordination helpers
+- `usecase/policy/*.rs` owns target-selection behavior
+- `gateway/*.rs` owns concrete eBPF, procfs, Docker, and systemd I/O
+
 ## Suggested reading order
 
 For a first pass through the code, read these files in order:
 
 1. `tracepoint-demo/src/main.rs`: process entry point
-2. `tracepoint-demo/src/interface/app_builder.rs`: CLI parsing and concrete dependency setup
-3. `tracepoint-demo/src/interface/cli.rs`: CLI DTO mapping into the usecase request
-4. `tracepoint-demo/src/usecase/trace_selected_targets.rs`: user-intent entry point and port-facing request types
-5. `tracepoint-demo/src/usecase/ports.rs`: the inbound request/output seam and runtime ports
-6. `tracepoint-demo/src/usecase/support/startup.rs`: initial target resolution and startup state
-7. `tracepoint-demo/src/usecase/watch_*.rs`: target-mode-specific runtime behavior
-8. `tracepoint-demo/src/interface/runtime_loop.rs`: main async loop while the daemon is running
-9. `tracepoint-demo/src/gateway/docker.rs` and `tracepoint-demo/src/gateway/systemd.rs`: concrete Docker/systemd runtime gateways
-10. `tracepoint-demo/src/gateway/*.rs`: actual system and eBPF integration details
+2. `tracepoint-demo/src/infra/bootstrap.rs`: composition root
+3. `tracepoint-demo/src/infra/presentation/cli.rs`: CLI mapping into usecase requests
+4. `tracepoint-demo/src/infra/startup.rs`: startup preparation with concrete dependencies
+5. `tracepoint-demo/src/usecase/policy/trace_selected_targets.rs`: user-intent entry point
+6. `tracepoint-demo/src/usecase/port/definitions.rs`: port definitions and related DTOs
+7. `tracepoint-demo/src/usecase/orchestration/startup_prepare.rs`: startup planning seam
+8. `tracepoint-demo/src/usecase/orchestration/watch_roots.rs`: watch-root merge and diff logic
+9. `tracepoint-demo/src/usecase/policy/watch_*.rs`: target-mode-specific policy
+10. `tracepoint-demo/src/infra/runtime_loop.rs`: top-level runtime control loop
+11. `tracepoint-demo/src/gateway/*.rs`: concrete external operations
 
-That path follows the same order the program follows at runtime, so it is the fastest route to a
-working mental model.
+That path follows the same order the program follows at runtime.
 
 ## Key terms
 
@@ -59,300 +173,302 @@ Some terms appear repeatedly in the code and are easy to confuse on a first read
 - `PROC_STATE`: kernel-side per-process cache used while following descendants
 - runtime update: a userspace message saying that container or systemd state changed
 
-## Why the split exists
+## Why this split exists
 
-`main.rs` is now a thin composition root because the daemon grew beyond simple PID tracing:
+This daemon grew beyond simple PID tracing. Userspace now has to coordinate:
 
 - CLI parsing and normalization
-- mapping the parsed CLI into a usecase request
+- request mapping into the usecase layer
 - eBPF loading and map operations
 - PID and TTY target discovery
 - Docker and systemd client initialization
-- Docker and systemd adapter implementations
-- Docker and systemd runtime monitoring
+- Docker and systemd monitoring
+- runtime update handling
 - event-loop control and output formatting
 
-Keeping those concerns in one file made the code harder to extend once Docker and systemd support
-were added. The current split keeps the project small while separating user intent, application
-wiring, and external I/O.
+Keeping all of that in one entry file makes the flow harder to read and harder to test. The target
+split is meant to keep three concerns separate:
 
-## Current layering
+- `infra`: entering the program, building dependencies, and handling user-facing edges
+- `usecase`: deciding what the daemon should do for a given target selection
+- `gateway`: talking to external systems
 
-- `main.rs`: initialize logging, delegate startup, and start the runtime.
-- `interface/`: CLI parsing, output, runtime loop, concrete client initialization, and concrete implementations of usecase ports.
-- `usecase/`: user-intent entry points, request/port definitions, and shared orchestration helpers under `usecase/support/`.
-- `gateway/`: all external I/O, including Aya/eBPF, procfs/cgroup, Docker, and systemd.
+This is intentionally clean-architecture-oriented, but still pragmatic for a daemon whose core
+complexity is orchestration rather than rich business modeling.
 
-This is intentionally "clean-architecture-like", not a full clean architecture.
-The split follows where the code's complexity actually lives:
+## Target directory layout
 
-- input normalization and runtime wiring
-- target-specific watch decisions
-- kernel and system integration
+The agreed target layout after the refactor is:
 
-It does not introduce layers that only rename these same responsibilities.
+```text
+tracepoint-demo/src/
+├── lib.rs
+├── main.rs
+├── gateway/
+│   ├── docker.rs
+│   ├── ebpf.rs
+│   ├── mod.rs
+│   ├── procfs.rs
+│   └── systemd.rs
+├── infra/
+│   ├── bootstrap.rs
+│   ├── docker.rs
+│   ├── mod.rs
+│   ├── runtime_loop.rs
+│   ├── startup.rs
+│   ├── systemd.rs
+│   └── presentation/
+│       ├── cli.rs
+│       ├── mod.rs
+│       ├── output.rs
+│       ├── runtime_update_dispatch.rs
+│       ├── runtime_updates.rs
+│       └── wait.rs
+└── usecase/
+    ├── mod.rs
+    ├── orchestration/
+    │   ├── mod.rs
+    │   ├── startup_prepare.rs
+    │   ├── state.rs
+    │   ├── tty.rs
+    │   └── watch_roots.rs
+    ├── policy/
+    │   ├── mod.rs
+    │   ├── trace_selected_targets.rs
+    │   ├── watch_container.rs
+    │   ├── watch_pid_or_tty.rs
+    │   └── watch_systemd_unit.rs
+    └── port/
+        ├── definitions.rs
+        ├── mod.rs
+        └── runtime_update.rs
+```
 
-## If you want to change...
+This layout keeps initialization inside `infra`, concrete external operations inside `gateway`,
+and user-intent behavior inside `usecase`.
+
+## If you want to change
 
 This section is the quickest file lookup guide for common changes.
 
-- CLI flags or input normalization: `tracepoint-demo/src/interface/cli.rs`
-- startup wiring and concrete client creation: `tracepoint-demo/src/interface/app_builder.rs`
-- shared runtime ports and request DTOs: `tracepoint-demo/src/usecase/ports.rs`
-- startup target resolution: `tracepoint-demo/src/usecase/support/startup.rs`
-- PID or TTY wait behavior: `tracepoint-demo/src/usecase/watch_pid_or_tty.rs`
-- container runtime behavior: `tracepoint-demo/src/usecase/watch_container.rs`
-- systemd runtime behavior: `tracepoint-demo/src/usecase/watch_systemd_unit.rs`
-- Docker adapter construction: `tracepoint-demo/src/interface/docker.rs`
-- systemd adapter construction: `tracepoint-demo/src/interface/systemd.rs`
-- Docker runtime I/O and monitoring: `tracepoint-demo/src/gateway/docker.rs`
-- systemd runtime I/O and monitoring: `tracepoint-demo/src/gateway/systemd.rs`
-- watch-set merge logic: `tracepoint-demo/src/usecase/support/watch_roots.rs`
-- runtime update dispatch: `tracepoint-demo/src/interface/runtime_updates.rs`
-- main event loop: `tracepoint-demo/src/interface/runtime_loop.rs`
-- output formatting: `tracepoint-demo/src/interface/output.rs`
-- shared TTY normalization: `tracepoint-demo/src/usecase/support/tty.rs`
-- eBPF program loading, maps, and ring buffer handling: `tracepoint-demo/src/gateway/ebpf.rs`
-- kernel-side event generation: `tracepoint-demo-ebpf/src/main.rs`
+- CLI flags or input normalization:
+  - file: `tracepoint-demo/src/infra/presentation/cli.rs`
+- startup wiring, dependency setup, and runtime startup:
+  - files: `tracepoint-demo/src/infra/bootstrap.rs` and `tracepoint-demo/src/infra/startup.rs`
+- runtime loop control:
+  - file: `tracepoint-demo/src/infra/runtime_loop.rs`
+- shared outbound traits and related DTOs:
+  - files: `tracepoint-demo/src/usecase/port/definitions.rs` and `tracepoint-demo/src/usecase/port/runtime_update.rs`
+- usecase-internal orchestration:
+  - files under `tracepoint-demo/src/usecase/orchestration/`
+- PID or TTY wait behavior:
+  - file: `tracepoint-demo/src/usecase/policy/watch_pid_or_tty.rs`
+- container runtime behavior:
+  - file: `tracepoint-demo/src/usecase/policy/watch_container.rs`
+- systemd runtime behavior:
+  - file: `tracepoint-demo/src/usecase/policy/watch_systemd_unit.rs`
+- Docker runtime I/O and monitoring:
+  - file: `tracepoint-demo/src/gateway/docker.rs`
+- systemd runtime I/O and monitoring:
+  - file: `tracepoint-demo/src/gateway/systemd.rs`
+- eBPF loading, maps, and ring buffer handling:
+  - file: `tracepoint-demo/src/gateway/ebpf.rs`
+- kernel-side event generation:
+  - file: `tracepoint-demo-ebpf/src/main.rs`
 
-If you are not sure where a behavior lives, start from `trace_selected_targets.rs` and follow the
-call chain outward. In this repository, that is usually faster than searching for an abstract
-architecture term like "service" or "controller".
+If you are not sure where a behavior lives, start from `trace_selected_targets.rs` for policy, from
+`usecase/port/` for boundaries, and from `infra/bootstrap.rs` for top-level wiring.
 
 ## What each layer owns in this repository
 
-### `main.rs`
+### Entry file
 
-`main.rs` is deliberately tiny. Its job is to initialize logging and hand control to the
-application builder. That keeps the process entry point obvious and avoids rebuilding startup logic
-there.
+`main.rs` stays deliberately tiny. It exists only to start bootstrap.
 
-### `interface/`
+### `infra/bootstrap`
 
-`interface` is the program edge.
+`infra/bootstrap` owns whole-program startup and runtime control.
 
-- `cli.rs` defines `CliArgs` and maps parsed input into the usecase's `TraceRequest`.
-- `app_builder.rs` parses CLI input, initializes Docker and systemd clients only when needed, loads
-  the eBPF object, asks the usecase to prepare runtime state, starts monitors, and enters the
-  runtime loop.
-- `runtime_loop.rs` owns the top-level `tokio::select!` loop that listens to the ring buffer,
-  runtime updates, and Ctrl-C.
-- `runtime_updates.rs` adapts `AppState` mutations to the generic runtime update dispatcher.
-- `runtime_update_dispatch.rs` contains the pure dispatch seam that routes `RuntimeUpdate` values.
-- `output.rs` formats the user-facing startup, shutdown, warning, and exec-event messages.
-- `wait.rs` is the signal-aware wait adapter used when startup flows need to block until a target
-  appears or becomes active.
-- `docker.rs` and `systemd.rs` construct concrete clients and hand them to the gateway layer.
+- build concrete dependencies only when needed
+- load the eBPF object
+- call the relevant usecase entry
+- start monitors once state is prepared
+- enter the top-level runtime loop
 
-This layer knows concrete libraries such as `clap`, `bollard`, `zbus`, `tokio`, and Aya runtime
-types because it is the boundary where those libraries enter the program.
+The current files are `infra/bootstrap.rs`, `infra/startup.rs`, and `infra/runtime_loop.rs`.
 
-### `usecase/`
+### `infra/presentation`
 
-`usecase` owns the "what should the daemon do for this target selection?" decisions.
+`infra/presentation` owns user-facing edges.
 
-- `trace_selected_targets.rs` is the usecase entry point for "trace execs for the selected
-  targets". It also defines the request DTO and startup resources the usecase expects.
-- `ports.rs` defines the abstractions that inner code depends on: container/systemd runtime ports
-  plus the reporter and wait seams for user-visible notices and interruption-aware retry waits.
-- `support/startup.rs` translates the usecase request into initial watch roots, seeds initial
-  state, and prepares the runtime state.
-- `watch_pid_or_tty.rs` handles "wait until matching PIDs or TTY owners appear".
-- `watch_container.rs` decides how a container should be seeded and how runtime PID changes are
-  applied, without knowing `bollard::Docker`.
-- `watch_systemd_unit.rs` does the same for systemd units, including the fallback rules when
-  `MainPID` is unavailable, without knowing `zbus::Connection`.
-- `support/watch_roots.rs` merges static roots with runtime-derived roots and synchronizes the final
-  `WATCH_PIDS` set.
-- `usecase/support/` contains `startup_prepare.rs`, `runtime_update.rs`, `state.rs`, `tty.rs`, and
-  `watch_roots.rs` so the top-level usecases stay focused on user-visible
-  actions while the shared orchestration stays testable.
+- parse CLI input and map it into usecase request DTOs
+- format startup, warning, shutdown, and exec-event messages
+- provide signal-aware wait behavior used by the usecases
+- adapt runtime updates for presentation-side handling when needed
 
-This layer is where the repository's main logic lives. It is coordinating watch strategy, not
-modelling a rich business domain.
+The current files are under `infra/presentation/`.
 
-### `gateway/`
+### `usecase/policy`
 
-`gateway` owns the system-specific details.
-
-- `ebpf.rs` loads and attaches programs, reads the task iterator, seeds `PROC_STATE`, updates
-  `WATCH_PIDS`, and decodes raw exec events for the caller.
-- `procfs.rs` reads `/proc` and cgroup files.
-- `docker.rs` translates Docker inspection into "current main PID or none" and owns Docker event
-  stream monitoring / polling for runtime updates.
-- `systemd.rs` translates D-Bus calls into "unit exists or not", "running or not", "main PID /
-  process list", and owns property-subscription monitoring for runtime updates.
-
-This keeps protocol details, API quirks, and map operations out of the usecase layer.
-
-## How the layers interact
-
-1. `main.rs` calls into `interface/app_builder.rs`.
-2. `interface` parses CLI args, maps them into a `TraceRequest`, and initializes concrete Docker/systemd clients only when needed.
-3. `usecase` resolves the initial roots for each selected target mode through its ports.
-4. `gateway` loads the BPF object, seeds maps, and queries external systems.
-5. `usecase/support/startup.rs` and the target-specific watch modules prepare the initial runtime state.
-6. `usecase/support/watch_roots.rs` merges static and dynamic roots into the final watch set.
-7. `interface` starts background monitors via the runtimes prepared by the usecase.
-8. `interface/runtime_loop.rs` drains exec events, formats them, forwards runtime updates, and handles Ctrl-C.
-
-## One concrete execution trace
-
-For a concrete example, consider `--container my-service`:
-
-1. `interface/app_builder.rs` parses the CLI, constructs a Docker-backed container runtime port,
-   and loads the eBPF object.
-2. `usecase/trace_selected_targets.rs` hands the request to startup preparation.
-3. `usecase/support/startup.rs` asks the container runtime port for the current main PID and seeds
-   initial watch state.
-4. `usecase/support/watch_roots.rs` builds the merged watch set and writes it into `WATCH_PIDS`.
-5. `interface/app_builder.rs` starts the background monitor using the prepared container runtime.
-   The actual Docker event-stream monitoring runs in `gateway/docker.rs`.
-6. `interface/runtime_loop.rs` keeps draining exec events and applying runtime updates.
-7. `gateway/ebpf.rs` remains the layer that actually talks to maps, programs, and the ring buffer.
-
-If you can follow that path, the rest of the repository will feel much less opaque.
-
-## Intent-oriented usecases
-
-The main public entry in `usecase` is split around user intent, not internal mechanics.
-
-- `trace_selected_targets.rs` represents the user-visible goal: start tracing execs for the chosen
-  PID, TTY, container, and systemd selections.
-
-- `watch_pid_or_tty.rs` handles explicit PID and TTY watching.
-- `watch_container.rs` handles container-based watching and PID changes over time.
-- `watch_systemd_unit.rs` handles systemd-unit-based watching and activity changes.
-
-Support modules such as `support/startup.rs`, `support/startup_prepare.rs`,
-`support/watch_roots.rs`,
-`support/state.rs`, and `support/runtime_update.rs` exist to keep those intent-facing entries
-small while isolating integration-heavy coordination.
-
-The important point is that the user-visible modes already define the natural seams:
+`usecase/policy` owns the question: "what should the daemon do for this target selection?"
 
 - watch explicit PIDs
 - watch processes attached to a TTY
 - watch processes inside a container
 - watch processes belonging to a systemd unit
 
-Those seams are more meaningful in this daemon than generic "service", "controller", or
-"repository" categories.
+These policies define waiting rules, watch-root behavior, and runtime-update behavior without
+depending on concrete Docker, systemd, procfs, or eBPF APIs.
 
-## Gateway boundaries
+The current files are under `usecase/policy/`.
 
-The `gateway` layer owns the protocol-specific code and keeps it close to the external system it
-talks to.
+### `usecase/port`
 
-- `gateway/ebpf.rs`: load and attach programs, expose maps and ring buffers, seed `PROC_STATE`, and
-  synchronize `WATCH_PIDS`.
-- `gateway/procfs.rs`: procfs and cgroup helpers.
-- `gateway/docker.rs`: container inspection, main-PID queries, and Docker event/poll monitoring.
-- `gateway/systemd.rs`: unit resolution, `MainPID` queries, process listing, and D-Bus property
-  subscription monitoring.
+`usecase/port` owns the boundaries the usecases depend on.
 
-`interface/docker.rs` and `interface/systemd.rs` stay as the edge where concrete clients are
-constructed. The protocol-specific monitoring machinery now lives in `gateway/`.
+- container runtime queries and monitoring
+- systemd status queries and monitoring
+- reporter and wait seams
+- any future tracing backend seams needed to remove direct eBPF/procfs calls from usecases
+
+Those abstractions belong to `usecase`, not to `gateway`, because the inner layer should own the
+contracts that outer layers implement.
+
+The current files are under `usecase/port/`.
+
+### `usecase/orchestration`
+
+`usecase/orchestration` owns internal step decomposition for usecases.
+
+It exists to keep policy entry points small when a usecase needs shared coordination such as:
+
+- planning startup watch roots
+- merging static and runtime-derived roots
+- maintaining runtime update DTOs and state records tied to usecase behavior
+- shared normalization helpers closely tied to usecase flows
+
+It does not own whole-program initialization. If the question is "how does the process boot and
+wire concrete dependencies together?", that belongs to `infra/bootstrap`, not here.
+
+The current files are under `usecase/orchestration/`.
+
+### `gateway`
+
+`gateway` owns concrete external operations and protocol details.
+
+- `ebpf.rs`: load and attach programs, expose maps and ring buffers, seed state, and synchronize
+  `WATCH_PIDS`
+- `procfs.rs`: procfs and cgroup helpers
+- `docker.rs`: container inspection, main-PID queries, and Docker monitoring
+- `systemd.rs`: unit resolution, status queries, process listing, and D-Bus monitoring
+
+This layer keeps protocol quirks, API details, and system-specific I/O out of the usecase layer.
+
+## How the layers interact
+
+1. `main.rs` hands control to bootstrap.
+2. `infra/bootstrap` gathers presentation input, constructs concrete dependencies, and prepares the
+   usecase request.
+3. `usecase/policy` executes the user-intent flow and relies only on `usecase/port` traits.
+4. `usecase/orchestration` helps multi-step usecase flows stay small and testable.
+5. `gateway` implements the required ports and performs the external operations.
+6. `infra/bootstrap` starts monitors and runs the top-level loop once the usecase returns prepared
+   state.
+7. `infra/presentation` formats the user-visible output.
+
+The dependency direction should stay one-way:
+
+- `usecase` owns policies and ports
+- `gateway` depends on `usecase/port` to implement those contracts
+- `infra` depends on both because it is the outer composition root
+
+## One concrete execution trace
+
+For a concrete example, consider `--container my-service`.
+
+In the target architecture, the flow is:
+
+1. `main.rs` enters `infra/bootstrap`.
+2. `infra/presentation` parses the CLI and builds the request DTO.
+3. `infra/bootstrap` prepares the concrete Docker client, eBPF handle, and any other required
+   dependencies.
+4. `usecase/policy` decides how the selected container should be watched.
+5. `usecase/orchestration` prepares shared startup plan details such as merged watch roots.
+6. `gateway/docker.rs` performs the concrete container query and monitor work.
+7. `gateway/ebpf.rs` performs the concrete map and ring buffer work.
+8. `infra/bootstrap` starts the runtime loop and hands user-visible output to
+   `infra/presentation`.
+
+In the current code, that bootstrap role lives under `infra/`, while the shared usecase planning
+helpers live under `usecase/orchestration/`.
 
 ## Why there is no `domain/` layer
 
 This repository does not have a rich business domain in the usual application sense.
-Its core concern is not "business rules independent of infrastructure"; it is "observe process
-execution by coordinating eBPF, procfs, Docker, and systemd".
+Its core concern is not pricing, approval rules, or account lifecycles. Its core concern is
+coordinating tracing-related behavior across eBPF, procfs, Docker, and systemd.
 
-The central data types are mostly transport or runtime state:
+That means the central code is better described as:
+
+- policy: what to watch and how to react
+- port: what the policy needs from the outside world
+- orchestration: how multi-step usecase flows stay readable
+
+The main data types are mostly transport, runtime state, or shared ABI structures:
 
 - `ExecEvent` and `TaskRel` in `tracepoint-demo-common` are shared ABI structs between eBPF and
-  userspace.
-- `SystemdUnitStatus` is a projection of D-Bus state.
-- `AppState` is mostly a holder for watch maps, runtime records, and current root sets.
-- `ContainerRuntime` and `SystemdRuntime` are runtime tracking records that hold usecase-facing
-  ports plus current process state; they are not long-lived domain entities with business
-  invariants.
+  userspace
+- `SystemdUnitRuntimeStatus` is a projection of D-Bus state
+- `AppState` is primarily a runtime holder for watch maps and current roots
+- container/systemd runtime records are coordination state, not rich domain entities
 
-The main complexity is orchestration across external systems:
+Adding a separate `domain/` layer here would mostly add translation code without isolating a more
+stable business model.
 
-- load and attach BPF programs
-- read task relationships from the iterator
-- inspect Docker containers
-- query systemd state
-- update watch maps when runtime state changes
+## Why there is no `repository/` layer
 
-That complexity is already captured by `usecase` plus `gateway`.
-Those layers already describe the stable concepts in this repository: target selection, watch-root
-merging, runtime updates, and system interaction.
+This repository also does not benefit from a separate `repository/` layer.
 
-Adding a `domain/` layer here would mostly create one of two outcomes:
+The abstractions that the inner layer needs are not mostly persistence repositories. They are
+outbound ports such as:
 
-- thin wrappers around existing structs like "WatchTarget", "UnitState", or "ContainerState"
-  without adding new rules
-- adapters that immediately unwrap back into `u32`, `Option<u32>`, `HashMap<u32, u32>`, or shared
-  ABI structs when talking to Aya, Docker, or systemd
+- query a container main PID
+- query a systemd unit status
+- start a monitor
+- wait with interruption handling
+- report user-visible status
+- eventually seed or synchronize tracing state through a tracing backend port
 
-In other words, it would add translation cost without isolating a meaningful business model.
+Those contracts are better modeled as `usecase/port`, with `gateway` implementing them.
+That keeps the dependency rule straightforward:
 
-For a business application, a domain layer often earns its keep because the core rules outlive the
-delivery mechanism or persistence choice. Here the opposite is true: the daemon exists to connect a
-CLI, an event loop, and kernel/system integrations. The external boundaries are the point of the
-program, so pushing them behind an extra `domain/` layer would not clarify the design.
+- inner layer defines the contract
+- outer layer implements the contract
 
 ## Why there is no controller layer
 
 There is also no separate controller layer because the application has a single interaction style:
 
 - parse one CLI invocation
-- prepare watchers and runtime state
+- prepare runtime state
 - enter one async event loop
 - react to runtime updates until Ctrl-C
 
-`interface/app_builder.rs` already handles the entry-point wiring, and
-`interface/runtime_loop.rs` already handles the top-level dispatch loop.
-
-Adding controllers would not separate different transports such as HTTP, gRPC, GUI, or batch jobs,
-because those transports do not exist here. It would mainly split one straightforward flow into
-extra request/response or command-dispatch objects.
-
-The current code also already has an explicit runtime dispatch shape:
-
-- background monitors send `RuntimeUpdate`
-- `runtime_loop.rs` receives the update and delegates update application through
-  `runtime_updates.rs`
-- the relevant usecase applies the state change
-- `support/watch_roots.rs` resynchronizes `WATCH_PIDS`
-
-That is controller-like enough for this daemon's needs. Turning it into a named controller layer
-would mostly rename coordination that is already clear in `interface` and `usecase`, while adding
-another place to keep in sync with the same update flow.
-
-## Why this tradeoff is reasonable for a non-business daemon
-
-This project is not centered on account rules, pricing logic, workflow approvals, or other
-business concepts that need to be preserved independently of infrastructure.
-
-It is centered on:
-
-- attaching to a tracepoint
-- seeding process state
-- watching a few target-selection modes
-- reacting to Docker and systemd changes
-- printing events
-
-For that kind of daemon, the best return comes from keeping the code easy to trace from the CLI to
-the kernel map update, with as few translation layers as possible.
-
-That is why the current split stops at `interface` / `usecase` / `gateway`.
-It gives clear ownership and testable seams without introducing abstract layers that this
-repository does not currently need.
+That flow is already naturally owned by `infra/bootstrap` plus `infra/presentation`.
+Adding controllers would mostly rename existing bootstrap and runtime coordination without creating
+new behavioral separation.
 
 ## Design guardrails
 
-- Avoid over-abstraction.
-- Introduce traits only when they improve tests or boundary clarity.
 - Keep `main.rs` thin.
-- Keep inner layers talking to request DTOs and ports rather than concrete interface types or
-  external client types.
+- Keep whole-program initialization in `infra`, not in `usecase/orchestration`.
+- Keep user-facing input and output in `infra/presentation`.
+- Keep port traits owned by `usecase`.
+- Keep `gateway` as the only layer that knows concrete external protocol details.
+- Keep `usecase/policy` focused on user intent.
+- Use `usecase/orchestration` only for internal usecase step decomposition, not as a second
+  bootstrap layer.
+- Introduce traits only when they improve testability or boundary clarity.
 - Keep `tracepoint-demo-common` compatible across eBPF and userspace.
-- Keep the public usecase entry named after user intent; keep extracted startup, root-merging, and
-  monitor seams under `usecase/support/` rather than as new top-level architectural layers.
-- Add new target modes as new `usecase/watch_*.rs` modules when possible.
+- Add new target modes as new policy modules when possible.
 - Add new external integrations under `gateway/`.

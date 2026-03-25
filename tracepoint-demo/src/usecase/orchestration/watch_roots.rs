@@ -106,7 +106,10 @@ mod tests {
     use super::*;
     use crate::usecase::{
         policy::{watch_container::ContainerRuntime, watch_systemd_unit::SystemdRuntime},
-        port::{BoxFuture, ContainerRuntimePort, RuntimeUpdate, SystemdRuntimePort, SystemdUnitRuntimeStatus},
+        port::{
+            BoxFuture, ContainerRuntimePort, RuntimeUpdate, SystemdRuntimePort,
+            SystemdUnitRuntimeStatus,
+        },
     };
 
     struct FakeContainerRuntimePort;

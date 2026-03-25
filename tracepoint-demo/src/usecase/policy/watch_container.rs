@@ -8,9 +8,7 @@ use crate::{
         ebpf::{seed_proc_state_direct, seed_proc_state_from_task_iter},
         procfs::{read_cgroup_procs, read_cgroup_v2_path},
     },
-    usecase::{
-        port::{RuntimeUpdate, SharedContainerRuntimePort, StatusReporter},
-    },
+    usecase::port::{RuntimeUpdate, SharedContainerRuntimePort, StatusReporter},
 };
 
 pub struct ContainerRuntime {
@@ -109,9 +107,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::usecase::{
-        port::{BoxFuture, ContainerRuntimePort, RuntimeUpdate},
-    };
+    use crate::usecase::port::{BoxFuture, ContainerRuntimePort, RuntimeUpdate};
 
     struct FakeContainerRuntimePort;
 

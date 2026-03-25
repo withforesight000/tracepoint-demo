@@ -6,12 +6,9 @@ use tokio::sync::mpsc;
 
 use crate::{
     gateway::ebpf::{seed_proc_state_direct, seed_proc_state_from_task_iter},
-    usecase::{
-        port::{
-            RuntimeUpdate,
-            SharedSystemdRuntimePort, StatusReporter, SystemdRuntimePort, SystemdUnitRuntimeStatus,
-            WaitPort,
-        },
+    usecase::port::{
+        RuntimeUpdate, SharedSystemdRuntimePort, StatusReporter, SystemdRuntimePort,
+        SystemdUnitRuntimeStatus, WaitPort,
     },
 };
 
