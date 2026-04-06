@@ -55,8 +55,10 @@ Startup behavior:
   shows the resolved PIDs when they are available.
 - Container and systemd targets refresh their main PID while the daemon is running.
 - `--all-container-processes` also refreshes container state when Docker reports exec activity
-  inside the container. A fast cgroup probe seeds the new exec pid, so direct `docker exec` and
-  `docker compose exec` launches are picked up.
+  inside the container. A fast cgroup probe seeds the new exec pid, and child commands launched
+  from that shell inherit watch state at exec time, so direct `docker exec`, `docker compose exec`,
+  and later commands from that shell are picked up. The watch cache is kept at process granularity,
+  so helper-thread exits during the `docker exec` handoff do not drop that shell state.
 - Shell builtins such as `cd`, `pwd`, and `echo` do not emit traces because they do not make an
   `execve` syscall. External commands launched from the shell do trace.
 - TTY input accepts `/dev/` paths and normalized PTY names such as `pts9`.

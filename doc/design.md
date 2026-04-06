@@ -214,8 +214,10 @@ split is meant to keep three concerns separate:
 
 For container targets with `--all-container-processes`, Docker exec activity can trigger a
 container reseed even when the container's main PID stays the same. A fast cgroup probe also
-seeds the exec pid as soon as it appears, which keeps the cgroup-backed watch set aligned with
-`docker exec` and `docker compose exec` sessions.
+seeds the exec pid as soon as it appears, and execs from child commands inherit watch state from
+the parent shell so later commands inside `docker exec` and `docker compose exec` sessions stay
+visible. That watch state is held per process rather than per thread so helper-thread exits during
+the Docker exec handoff do not accidentally evict the interactive shell from `PROC_STATE`.
 
 When Docker briefly reports a running container with no usable PID, the startup path treats that
 as "not ready yet" and retries through the normal monitor loop instead of aborting.
