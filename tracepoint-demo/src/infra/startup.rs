@@ -162,7 +162,21 @@ fn collect_target_descriptions(
             .collect::<Vec<_>>()
             .join(", ");
         if all_systemd_processes {
-            target_descriptions.push(format!("systemd-units=[{}] seed=all-procs", unit_list));
+            let mut seeded_pids = systemd_runtimes
+                .iter()
+                .flat_map(|runtime| runtime.seeded_pids.iter().copied())
+                .collect::<Vec<_>>();
+            seeded_pids.sort_unstable();
+            seeded_pids.dedup();
+
+            if seeded_pids.is_empty() {
+                target_descriptions.push(format!("systemd-units=[{}] seed=all-procs", unit_list));
+            } else {
+                target_descriptions.push(format!(
+                    "systemd-units=[{}] seed=all-procs pids={:?}",
+                    unit_list, seeded_pids
+                ));
+            }
         } else {
             target_descriptions.push(format!("systemd-units=[{}]", unit_list));
         }
@@ -284,6 +298,7 @@ mod tests {
             unit_name: "svc".to_string(),
             watch_children: false,
             all_processes: false,
+            seeded_pids: Vec::new(),
             flags: 2,
             current_pid: Some(2),
             current_running: true,
@@ -318,6 +333,7 @@ mod tests {
             unit_name: "svc".to_string(),
             watch_children: false,
             all_processes: true,
+            seeded_pids: vec![2, 3],
             flags: 2,
             current_pid: Some(2),
             current_running: true,
@@ -325,6 +341,9 @@ mod tests {
 
         let desc = collect_target_descriptions(&[], &[systemd_runtime], false, true);
 
-        assert_eq!(desc, vec!["systemd-units=[svc] seed=all-procs".to_string()]);
+        assert_eq!(
+            desc,
+            vec!["systemd-units=[svc] seed=all-procs pids=[2, 3]".to_string()]
+        );
     }
 }

@@ -160,7 +160,7 @@ pub(crate) async fn initialize_systemd_runtimes<
         };
 
         let current_running = status.is_running();
-        if current_running {
+        let seeded_pids = if current_running {
             seed_systemd_unit_processes(
                 process_seed,
                 reporter,
@@ -173,14 +173,17 @@ pub(crate) async fn initialize_systemd_runtimes<
                     all_processes: all_systemd_processes,
                 },
             )
-            .await?;
-        }
+            .await?
+        } else {
+            Vec::new()
+        };
 
         systemd_runtimes.push(SystemdRuntime {
             runtime: runtime.clone(),
             unit_name: unit_name.clone(),
             watch_children: unit_watch_children,
             all_processes: all_systemd_processes,
+            seeded_pids,
             flags: unit_flags,
             current_pid: status.main_pid,
             current_running,

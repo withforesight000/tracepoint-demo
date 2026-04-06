@@ -13,6 +13,7 @@ pub struct SystemdRuntime {
     pub unit_name: String,
     pub watch_children: bool,
     pub all_processes: bool,
+    pub seeded_pids: Vec<u32>,
     pub flags: u32,
     pub current_pid: Option<u32>,
     pub current_running: bool,
@@ -72,10 +73,13 @@ pub(crate) async fn seed_systemd_unit_processes<TReporter: StatusReporter + ?Siz
     reporter: &mut TReporter,
     runtime: &dyn SystemdRuntimePort,
     spec: SystemdSeedSpec<'_>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<u32>> {
     if spec.all_processes {
         match runtime.unit_pids(spec.unit_name).await {
-            Ok(pids) => process_seed.seed_direct(&pids, spec.flags)?,
+            Ok(pids) => {
+                process_seed.seed_direct(&pids, spec.flags)?;
+                return Ok(pids);
+            }
             Err(err) => {
                 let main_pid = spec.main_pid.ok_or_else(|| {
                     anyhow::anyhow!(
@@ -88,14 +92,14 @@ pub(crate) async fn seed_systemd_unit_processes<TReporter: StatusReporter + ?Siz
                     spec.unit_name, err
                 ));
                 let empty_tty_filters = HashSet::new();
-                let _ = process_seed.seed_from_task_iter(
+                let seeded_roots = process_seed.seed_from_task_iter(
                     &[main_pid],
                     &empty_tty_filters,
                     spec.flags,
                 )?;
+                return Ok(seeded_roots);
             }
         }
-        return Ok(());
     }
 
     let main_pid = spec.main_pid.ok_or_else(|| {
@@ -107,12 +111,14 @@ pub(crate) async fn seed_systemd_unit_processes<TReporter: StatusReporter + ?Siz
 
     if spec.watch_children {
         let empty_tty_filters = HashSet::new();
-        let _ = process_seed.seed_from_task_iter(&[main_pid], &empty_tty_filters, spec.flags)?;
+        let seeded_roots =
+            process_seed.seed_from_task_iter(&[main_pid], &empty_tty_filters, spec.flags)?;
+        return Ok(seeded_roots);
     } else {
         process_seed.seed_direct(&[main_pid], spec.flags)?;
     }
 
-    Ok(())
+    Ok(vec![main_pid])
 }
 
 pub async fn apply_systemd_runtime_update<TReporter: StatusReporter + ?Sized>(
@@ -127,7 +133,7 @@ pub async fn apply_systemd_runtime_update<TReporter: StatusReporter + ?Sized>(
     }
 
     if running && (runtime.all_processes || next_pid.is_some()) {
-        seed_systemd_unit_processes(
+        runtime.seeded_pids = seed_systemd_unit_processes(
             process_seed,
             reporter,
             runtime.runtime.as_ref(),
@@ -140,6 +146,8 @@ pub async fn apply_systemd_runtime_update<TReporter: StatusReporter + ?Sized>(
             },
         )
         .await?;
+    } else if !running {
+        runtime.seeded_pids.clear();
     }
 
     runtime.current_pid = next_pid;
@@ -290,7 +298,7 @@ mod tests {
         let runtime = QueuedSystemdRuntimePort::with_unit_pids_result(Ok(vec![11, 22]));
         let mut reporter = MockStatusReporter::new();
 
-        seed_systemd_unit_processes(
+        let seeded_pids = seed_systemd_unit_processes(
             &mut process_seed,
             &mut reporter,
             &runtime,
@@ -304,6 +312,8 @@ mod tests {
         )
         .await
         .unwrap();
+
+        assert_eq!(seeded_pids, vec![11, 22]);
     }
 
     #[tokio::test]
@@ -322,7 +332,7 @@ mod tests {
         let mut reporter = MockStatusReporter::new();
         reporter.expect_warn().times(1).return_const(());
 
-        seed_systemd_unit_processes(
+        let seeded_pids = seed_systemd_unit_processes(
             &mut process_seed,
             &mut reporter,
             &runtime,
@@ -336,6 +346,8 @@ mod tests {
         )
         .await
         .unwrap();
+
+        assert_eq!(seeded_pids, vec![77]);
     }
 
     #[tokio::test]
@@ -346,6 +358,7 @@ mod tests {
             unit_name: "demo.service".to_string(),
             watch_children: false,
             all_processes: false,
+            seeded_pids: Vec::new(),
             flags: 0x2,
             current_pid: Some(12),
             current_running: true,
@@ -400,6 +413,7 @@ mod tests {
             unit_name: "demo.service".to_string(),
             watch_children: false,
             all_processes: false,
+            seeded_pids: Vec::new(),
             flags: 0x2,
             current_pid: None,
             current_running: false,

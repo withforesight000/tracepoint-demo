@@ -220,6 +220,10 @@ seeds the exec pid as soon as it appears, which keeps the cgroup-backed watch se
 When Docker briefly reports a running container with no usable PID, the startup path treats that
 as "not ready yet" and retries through the normal monitor loop instead of aborting.
 
+When `--all-systemd-processes` is enabled, systemd unit startup descriptions include the current
+PID list resolved from the unit so the startup banner reflects the full seed set, not just the
+main PID.
+
 This tracer still only sees `execve` syscalls. Shell builtins like `cd`, `pwd`, and `echo` do not
 produce output; external commands launched from an interactive shell do.
 

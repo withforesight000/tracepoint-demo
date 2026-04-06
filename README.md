@@ -51,6 +51,8 @@ Startup behavior:
 - If Docker reports a running container with an invalid or missing PID, the daemon defers and
   retries instead of aborting startup.
 - Systemd units wait until they are active.
+- `--all-systemd-processes` seeds the unit's current PID list at startup, and the startup banner
+  shows the resolved PIDs when they are available.
 - Container and systemd targets refresh their main PID while the daemon is running.
 - `--all-container-processes` also refreshes container state when Docker reports exec activity
   inside the container. A fast cgroup probe seeds the new exec pid, so direct `docker exec` and

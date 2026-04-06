@@ -167,6 +167,7 @@ mod tests {
             unit_name: "sshd.service".to_string(),
             watch_children: false,
             all_processes: false,
+            seeded_pids: Vec::new(),
             flags: 0x8,
             current_pid: None,
             current_running: false,
