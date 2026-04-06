@@ -42,10 +42,12 @@ fn main_pid_from_container_state(
 
     let pid = state.pid.unwrap_or(0);
     if pid <= 0 {
-        return Err(anyhow::anyhow!(
-            "Container {} returned invalid PID.",
-            name_or_id
-        ));
+        log::debug!(
+            "Container {} reported running with invalid PID {}, deferring",
+            name_or_id,
+            pid
+        );
+        return Ok(None);
     }
 
     Ok(Some(pid as u32))
@@ -437,15 +439,13 @@ mod tests {
     }
 
     #[test]
-    fn main_pid_from_inspect_propagates_invalid_running_pid() {
+    fn main_pid_from_inspect_returns_none_for_invalid_running_pid() {
         let inspect = ContainerInspectResponse {
             state: Some(state(Some(true), Some(0))),
             ..Default::default()
         };
 
-        let err = main_pid_from_inspect(&inspect, "demo").unwrap_err();
-
-        assert_eq!(err.to_string(), "Container demo returned invalid PID.");
+        assert_eq!(main_pid_from_inspect(&inspect, "demo").unwrap(), None);
     }
 
     #[test]
@@ -469,12 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn main_pid_from_container_state_rejects_non_positive_pid() {
+    fn main_pid_from_container_state_returns_none_for_non_positive_pid() {
         let container_state = state(Some(true), Some(0));
 
-        let err = main_pid_from_container_state(&container_state, "demo").unwrap_err();
-
-        assert_eq!(err.to_string(), "Container demo returned invalid PID.");
+        assert_eq!(
+            main_pid_from_container_state(&container_state, "demo").unwrap(),
+            None
+        );
     }
 
     #[test]

@@ -48,11 +48,15 @@ Startup behavior:
 
 - PID and TTY targets wait and retry until matching roots appear.
 - Containers wait until they are running.
+- If Docker reports a running container with an invalid or missing PID, the daemon defers and
+  retries instead of aborting startup.
 - Systemd units wait until they are active.
 - Container and systemd targets refresh their main PID while the daemon is running.
 - `--all-container-processes` also refreshes container state when Docker reports exec activity
   inside the container. A fast cgroup probe seeds the new exec pid, so direct `docker exec` and
   `docker compose exec` launches are picked up.
+- Shell builtins such as `cd`, `pwd`, and `echo` do not emit traces because they do not make an
+  `execve` syscall. External commands launched from the shell do trace.
 - TTY input accepts `/dev/` paths and normalized PTY names such as `pts9`.
 
 Examples:

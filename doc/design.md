@@ -217,6 +217,12 @@ container reseed even when the container's main PID stays the same. A fast cgrou
 seeds the exec pid as soon as it appears, which keeps the cgroup-backed watch set aligned with
 `docker exec` and `docker compose exec` sessions.
 
+When Docker briefly reports a running container with no usable PID, the startup path treats that
+as "not ready yet" and retries through the normal monitor loop instead of aborting.
+
+This tracer still only sees `execve` syscalls. Shell builtins like `cd`, `pwd`, and `echo` do not
+produce output; external commands launched from an interactive shell do.
+
 This is intentionally clean-architecture-oriented, but still pragmatic for a daemon whose core
 complexity is orchestration rather than rich business modeling.
 
