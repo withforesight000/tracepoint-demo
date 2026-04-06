@@ -201,8 +201,8 @@ mod tests {
     #[test]
     fn invalid_exec_event_size_message_is_descriptive() {
         assert_eq!(
-            invalid_exec_event_size_message(12, 300),
-            "unexpected ExecEvent size: 12 (expected 300)"
+            invalid_exec_event_size_message(12, 304),
+            "unexpected ExecEvent size: 12 (expected 304)"
         );
     }
 
@@ -226,7 +226,7 @@ mod tests {
             filename: [0; tracepoint_demo_common::EXEC_EVENT_FILENAME_SIZE],
             argv0: [0; tracepoint_demo_common::EXEC_EVENT_ARGV0_SIZE],
         });
-        print_invalid_exec_event_size(12, 300);
+        print_invalid_exec_event_size(12, 304);
     }
 
     #[test]

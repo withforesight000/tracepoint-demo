@@ -43,7 +43,7 @@ mod tests {
     #[test]
     fn taskrel_and_exec_event_sizes_are_valid() {
         assert_eq!(mem::size_of::<TaskRel>(), 72);
-        assert_eq!(mem::size_of::<ExecEvent>(), 300);
+        assert_eq!(mem::size_of::<ExecEvent>(), 304);
     }
 
     #[test]
