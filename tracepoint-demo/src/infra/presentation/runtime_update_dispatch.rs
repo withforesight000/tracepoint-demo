@@ -6,6 +6,7 @@ pub(crate) trait RuntimeUpdateHandler {
         index: usize,
         pid: Option<u32>,
         force_refresh: bool,
+        extra_pids: Vec<u32>,
     ) -> anyhow::Result<()>;
 
     async fn apply_systemd_status(
@@ -25,9 +26,10 @@ pub(crate) async fn handle_runtime_update<H: RuntimeUpdateHandler>(
             index,
             pid,
             force_refresh,
+            extra_pids,
         }) => {
             handler
-                .apply_container_pid(index, pid, force_refresh)
+                .apply_container_pid(index, pid, force_refresh, extra_pids)
                 .await?;
             Ok(true)
         }
@@ -64,6 +66,7 @@ mod tests {
             index: usize,
             pid: Option<u32>,
             _force_refresh: bool,
+            _extra_pids: Vec<u32>,
         ) -> anyhow::Result<()> {
             if let Some(message) = self.container_error {
                 return Err(anyhow::anyhow!(message));
@@ -96,6 +99,7 @@ mod tests {
                 index: 2,
                 pid: Some(42),
                 force_refresh: false,
+                extra_pids: Vec::new(),
             }),
         )
         .await
@@ -167,6 +171,7 @@ mod tests {
                 index: 0,
                 pid: Some(11),
                 force_refresh: false,
+                extra_pids: Vec::new(),
             }),
         )
         .await

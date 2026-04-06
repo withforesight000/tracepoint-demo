@@ -1,4 +1,9 @@
-use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    sync::Arc,
+    time::Duration,
+};
 
 use bollard::{
     Docker,
@@ -17,9 +22,10 @@ use crate::usecase::port::{
     BoxFuture, ContainerRuntimePort, RuntimeUpdate, SharedContainerRuntimePort,
 };
 
+#[derive(Debug)]
 enum ContainerMonitorSignal {
     Poll,
-    Refresh,
+    Refresh { extra_pids: Vec<u32> },
 }
 
 struct DockerContainerRuntimeGateway {
@@ -69,6 +75,127 @@ pub async fn query_container_main_pid(
     }
 }
 
+fn exec_id_from_event(event: &EventMessage) -> Option<&str> {
+    event
+        .actor
+        .as_ref()
+        .and_then(|actor| actor.attributes.as_ref())
+        .and_then(|attributes| attributes.get("execID"))
+        .map(String::as_str)
+}
+
+async fn query_exec_pid(docker: &Docker, exec_id: &str) -> anyhow::Result<Option<u32>> {
+    match docker.inspect_exec(exec_id).await {
+        Ok(exec) => Ok(match exec.pid {
+            Some(pid) if pid > 0 => Some(pid as u32),
+            _ => None,
+        }),
+        Err(err) => match err {
+            BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            } => Ok(None),
+            _ => Err(err.into()),
+        },
+    }
+}
+
+fn spawn_container_cgroup_probe(
+    docker: Docker,
+    name_or_id: String,
+    index: usize,
+    tx: mpsc::UnboundedSender<RuntimeUpdate>,
+) {
+    tokio::spawn(async move {
+        let current_pid = match query_container_main_pid(&docker, &name_or_id).await {
+            Ok(Some(pid)) => pid,
+            Ok(None) => {
+                log::debug!(
+                    "docker cgroup probe for {} could not resolve current container pid",
+                    name_or_id
+                );
+                return;
+            }
+            Err(err) => {
+                log::debug!(
+                    "docker cgroup probe for {} failed to resolve current container pid: {}",
+                    name_or_id,
+                    err
+                );
+                return;
+            }
+        };
+
+        let cgroup_path = match crate::gateway::procfs::read_cgroup_v2_path(current_pid) {
+            Ok(path) => path,
+            Err(err) => {
+                log::debug!(
+                    "docker cgroup probe for {} failed to resolve cgroup path for pid {}: {}",
+                    name_or_id,
+                    current_pid,
+                    err
+                );
+                return;
+            }
+        };
+
+        let mut known_pids: HashSet<u32> =
+            match crate::gateway::procfs::read_cgroup_procs(&cgroup_path) {
+                Ok(pids) => pids.into_iter().collect(),
+                Err(err) => {
+                    log::debug!(
+                        "docker cgroup probe for {} failed to read cgroup.procs at {}: {}",
+                        name_or_id,
+                        cgroup_path,
+                        err
+                    );
+                    return;
+                }
+            };
+
+        for _ in 0..100 {
+            match crate::gateway::procfs::read_cgroup_procs(&cgroup_path) {
+                Ok(pids) => {
+                    let extra_pids: Vec<u32> = pids
+                        .into_iter()
+                        .filter(|pid| known_pids.insert(*pid))
+                        .collect();
+
+                    if !extra_pids.is_empty() {
+                        log::debug!(
+                            "docker cgroup probe for {} resolved new pid(s) {:?}",
+                            name_or_id,
+                            extra_pids
+                        );
+                        let _ = tx.send(RuntimeUpdate::ContainerPid {
+                            index,
+                            pid: Some(current_pid),
+                            force_refresh: true,
+                            extra_pids,
+                        });
+                        return;
+                    }
+                }
+                Err(err) => {
+                    log::debug!(
+                        "docker cgroup probe for {} failed to reread cgroup.procs at {}: {}",
+                        name_or_id,
+                        cgroup_path,
+                        err
+                    );
+                    return;
+                }
+            }
+
+            sleep(Duration::from_millis(1)).await;
+        }
+
+        log::debug!(
+            "docker cgroup probe for {} timed out without seeing a new pid",
+            name_or_id
+        );
+    });
+}
+
 async fn monitor_container_runtime(
     docker: Docker,
     name_or_id: String,
@@ -77,6 +204,7 @@ async fn monitor_container_runtime(
     index: usize,
 ) -> anyhow::Result<()> {
     let query_docker = docker.clone();
+    let update_tx = tx.clone();
     let mut filters = HashMap::new();
     filters.insert("container".to_string(), vec![name_or_id.clone()]);
     let events: BoxStream<'static, Result<EventMessage, bollard::errors::Error>> = docker
@@ -94,31 +222,79 @@ async fn monitor_container_runtime(
         {
             let events = events.clone();
             let name_or_id = name_or_id.clone();
+            let query_docker = query_docker.clone();
+            let update_tx = update_tx.clone();
             move || {
                 let events = events.clone();
                 let name_or_id = name_or_id.clone();
+                let query_docker = query_docker.clone();
+                let update_tx = update_tx.clone();
                 async move {
                     select! {
+                        biased;
                         maybe_event = async {
                             let mut events = events.lock().await;
                             events.next().await
                         } => {
                             match maybe_event {
-                                // Docker exec activity does not change the container's main PID,
-                                // so all-processes mode uses exec start/create events as a refresh
-                                // trigger and reuses the cached PID instead of re-inspecting Docker.
-                                Some(Ok(event)) => Ok(if all_processes
-                                    && matches!(
-                                        event.action.as_deref(),
-                                        Some(action)
-                                            if action.starts_with("exec_create")
-                                                || action.starts_with("exec_start")
-                                    )
-                                {
-                                    ContainerMonitorSignal::Refresh
-                                } else {
-                                    ContainerMonitorSignal::Poll
-                                }),
+                                Some(Ok(event)) => {
+                                    let action = event.action.as_deref();
+                                    let is_exec_event = all_processes
+                                        && matches!(
+                                            action,
+                                            Some(action)
+                                                if action.starts_with("exec_create")
+                                                    || action.starts_with("exec_start")
+                                        );
+                                    if is_exec_event {
+                                        match exec_id_from_event(&event) {
+                                            Some(exec_id) => {
+                                                if matches!(
+                                                    action,
+                                                    Some(action) if action.starts_with("exec_create")
+                                                ) {
+                                                    spawn_container_cgroup_probe(
+                                                        query_docker.clone(),
+                                                        name_or_id.clone(),
+                                                        index,
+                                                        update_tx.clone(),
+                                                    );
+                                                    log::debug!(
+                                                        "docker event for {}: action={:?} exec_id={} probe=scheduled",
+                                                        name_or_id,
+                                                        action,
+                                                        exec_id
+                                                    );
+                                                } else {
+                                                    let pid = query_exec_pid(&query_docker, exec_id).await;
+                                                    log::debug!(
+                                                        "docker event for {}: action={:?} exec_id={} pid_lookup={:?}",
+                                                        name_or_id,
+                                                        action,
+                                                        exec_id,
+                                                        pid
+                                                    );
+                                                    if let Ok(Some(pid)) = pid {
+                                                        return Ok(ContainerMonitorSignal::Refresh {
+                                                            extra_pids: vec![pid],
+                                                        });
+                                                    }
+                                                }
+                                                Ok(ContainerMonitorSignal::Poll)
+                                            }
+                                            None => {
+                                                log::debug!(
+                                                    "docker event for {}: action={:?} missing exec id",
+                                                    name_or_id,
+                                                    action
+                                                );
+                                                Ok(ContainerMonitorSignal::Poll)
+                                            }
+                                        }
+                                    } else {
+                                        Ok(ContainerMonitorSignal::Poll)
+                                    }
+                                }
                                 Some(Err(err)) => Err(err.into()),
                                 None => Err(anyhow::anyhow!(
                                     "Docker event stream ended while monitoring container {name_or_id}."
@@ -160,15 +336,17 @@ where
         index,
         pid: current_pid,
         force_refresh: false,
+        extra_pids: Vec::new(),
     });
 
     loop {
         match wait_for_signal().await? {
-            ContainerMonitorSignal::Refresh => {
+            ContainerMonitorSignal::Refresh { extra_pids } => {
                 let _ = tx.send(RuntimeUpdate::ContainerPid {
                     index,
                     pid: current_pid,
                     force_refresh: true,
+                    extra_pids,
                 });
             }
             ContainerMonitorSignal::Poll => {
@@ -179,6 +357,7 @@ where
                         index,
                         pid: next_pid,
                         force_refresh: false,
+                        extra_pids: Vec::new(),
                     });
                 }
             }
@@ -345,22 +524,34 @@ mod tests {
         assert_eq!(err.to_string(), "stop");
         let updates = drain_updates(rx);
         assert_eq!(updates.len(), 2);
-        assert!(matches!(
-            updates[0],
+        match &updates[0] {
             RuntimeUpdate::ContainerPid {
-                index: 3,
-                pid: Some(10),
-                force_refresh: false
+                index,
+                pid,
+                force_refresh,
+                extra_pids,
+            } => {
+                assert_eq!(*index, 3);
+                assert_eq!(*pid, Some(10));
+                assert!(!*force_refresh);
+                assert!(extra_pids.is_empty());
             }
-        ));
-        assert!(matches!(
-            updates[1],
+            _ => panic!("expected container pid update"),
+        }
+        match &updates[1] {
             RuntimeUpdate::ContainerPid {
-                index: 3,
-                pid: Some(20),
-                force_refresh: false
+                index,
+                pid,
+                force_refresh,
+                extra_pids,
+            } => {
+                assert_eq!(*index, 3);
+                assert_eq!(*pid, Some(20));
+                assert!(!*force_refresh);
+                assert!(extra_pids.is_empty());
             }
-        ));
+            _ => panic!("expected container pid update"),
+        }
     }
 
     #[tokio::test]
@@ -368,7 +559,9 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let signals: Arc<Mutex<VecDeque<anyhow::Result<ContainerMonitorSignal>>>> =
             Arc::new(Mutex::new(VecDeque::from([
-                Ok(ContainerMonitorSignal::Refresh),
+                Ok(ContainerMonitorSignal::Refresh {
+                    extra_pids: vec![777],
+                }),
                 Err(anyhow::anyhow!("stop")),
             ])));
         let pids: Arc<Mutex<VecDeque<anyhow::Result<Option<u32>>>>> =
@@ -398,22 +591,34 @@ mod tests {
         assert_eq!(err.to_string(), "stop");
         let updates = drain_updates(rx);
         assert_eq!(updates.len(), 2);
-        assert!(matches!(
-            updates[0],
+        match &updates[0] {
             RuntimeUpdate::ContainerPid {
-                index: 7,
-                pid: Some(10),
-                force_refresh: false
+                index,
+                pid,
+                force_refresh,
+                extra_pids,
+            } => {
+                assert_eq!(*index, 7);
+                assert_eq!(*pid, Some(10));
+                assert!(!*force_refresh);
+                assert!(extra_pids.is_empty());
             }
-        ));
-        assert!(matches!(
-            updates[1],
+            _ => panic!("expected container pid update"),
+        }
+        match &updates[1] {
             RuntimeUpdate::ContainerPid {
-                index: 7,
-                pid: Some(10),
-                force_refresh: true
+                index,
+                pid,
+                force_refresh,
+                extra_pids,
+            } => {
+                assert_eq!(*index, 7);
+                assert_eq!(*pid, Some(10));
+                assert!(*force_refresh);
+                assert_eq!(extra_pids, &vec![777]);
             }
-        ));
+            _ => panic!("expected container pid update"),
+        }
     }
 
     #[tokio::test]
@@ -452,13 +657,19 @@ mod tests {
         assert_eq!(err.to_string(), "inspect failed");
         let updates = drain_updates(rx);
         assert_eq!(updates.len(), 1);
-        assert!(matches!(
-            updates[0],
+        match &updates[0] {
             RuntimeUpdate::ContainerPid {
-                index: 1,
-                pid: Some(10),
-                force_refresh: false
+                index,
+                pid,
+                force_refresh,
+                extra_pids,
+            } => {
+                assert_eq!(*index, 1);
+                assert_eq!(*pid, Some(10));
+                assert!(!*force_refresh);
+                assert!(extra_pids.is_empty());
             }
-        ));
+            _ => panic!("expected container pid update"),
+        }
     }
 }

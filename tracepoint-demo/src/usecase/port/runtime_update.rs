@@ -5,6 +5,8 @@ pub enum RuntimeUpdate {
         pid: Option<u32>,
         /// Refresh even when the main PID is unchanged.
         force_refresh: bool,
+        /// Additional PIDs to seed directly, such as Docker exec processes.
+        extra_pids: Vec<u32>,
     },
     SystemdStatus {
         index: usize,

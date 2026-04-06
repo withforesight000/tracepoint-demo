@@ -72,6 +72,7 @@ impl<TReporter: StatusReporter + ?Sized> RuntimeUpdateHandler
         index: usize,
         pid: Option<u32>,
         force_refresh: bool,
+        extra_pids: Vec<u32>,
     ) -> anyhow::Result<()> {
         let runtime = self.backend.container_runtime_mut(index)?;
         apply_container_runtime_update(
@@ -80,6 +81,7 @@ impl<TReporter: StatusReporter + ?Sized> RuntimeUpdateHandler
             runtime,
             pid,
             force_refresh,
+            &extra_pids,
         )
         .await?;
         self.backend.refresh_watch_pids()
@@ -211,6 +213,7 @@ mod tests {
                 index: 0,
                 pid: Some(41),
                 force_refresh: false,
+                extra_pids: Vec::new(),
             }),
         )
         .await
@@ -281,6 +284,7 @@ mod tests {
                 index: 1,
                 pid: Some(9),
                 force_refresh: false,
+                extra_pids: Vec::new(),
             }),
         )
         .await

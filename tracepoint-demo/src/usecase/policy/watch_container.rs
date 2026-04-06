@@ -71,12 +71,34 @@ pub async fn apply_container_runtime_update<TReporter: StatusReporter + ?Sized>(
     runtime: &mut ContainerRuntime,
     next_pid: Option<u32>,
     force_refresh: bool,
+    extra_pids: &[u32],
 ) -> anyhow::Result<()> {
     if !force_refresh && runtime.current_pid == next_pid {
+        log::debug!(
+            "container {} update skipped: pid unchanged at {:?}",
+            runtime.name_or_id,
+            next_pid
+        );
         return Ok(());
     }
 
     if let Some(pid) = next_pid {
+        log::debug!(
+            "container {} seeding pid {:?} (all_processes={}, watch_children={}, force_refresh={})",
+            runtime.name_or_id,
+            pid,
+            runtime.all_processes,
+            runtime.watch_children,
+            force_refresh
+        );
+        if !extra_pids.is_empty() {
+            log::debug!(
+                "container {} seeding extra pid(s) {:?}",
+                runtime.name_or_id,
+                extra_pids
+            );
+            process_seed.seed_direct(extra_pids, runtime.flags)?;
+        }
         seed_container_processes(
             process_seed,
             reporter,
@@ -93,6 +115,11 @@ pub async fn apply_container_runtime_update<TReporter: StatusReporter + ?Sized>(
     }
 
     runtime.current_pid = next_pid;
+    log::debug!(
+        "container {} current pid updated to {:?}",
+        runtime.name_or_id,
+        runtime.current_pid
+    );
     Ok(())
 }
 
@@ -252,6 +279,7 @@ mod tests {
             &mut runtime,
             Some(42),
             false,
+            &[],
         )
         .await
         .unwrap();
@@ -294,6 +322,7 @@ mod tests {
             &mut runtime,
             Some(42),
             true,
+            &[],
         )
         .await
         .unwrap();
@@ -357,6 +386,7 @@ mod tests {
             &mut runtime,
             Some(77),
             false,
+            &[],
         )
         .await
         .unwrap();

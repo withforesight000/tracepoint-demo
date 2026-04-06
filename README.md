@@ -51,7 +51,8 @@ Startup behavior:
 - Systemd units wait until they are active.
 - Container and systemd targets refresh their main PID while the daemon is running.
 - `--all-container-processes` also refreshes container state when Docker reports exec activity
-  inside the container, so `docker exec` and `docker compose exec` launches are picked up.
+  inside the container. A fast cgroup probe seeds the new exec pid, so direct `docker exec` and
+  `docker compose exec` launches are picked up.
 - TTY input accepts `/dev/` paths and normalized PTY names such as `pts9`.
 
 Examples:

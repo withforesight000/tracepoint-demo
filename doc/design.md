@@ -213,8 +213,9 @@ split is meant to keep three concerns separate:
 - `gateway`: talking to external systems
 
 For container targets with `--all-container-processes`, Docker exec activity can trigger a
-container reseed even when the container's main PID stays the same. That keeps the cgroup-backed
-watch set aligned with `docker exec` and `docker compose exec` sessions.
+container reseed even when the container's main PID stays the same. A fast cgroup probe also
+seeds the exec pid as soon as it appears, which keeps the cgroup-backed watch set aligned with
+`docker exec` and `docker compose exec` sessions.
 
 This is intentionally clean-architecture-oriented, but still pragmatic for a daemon whose core
 complexity is orchestration rather than rich business modeling.
