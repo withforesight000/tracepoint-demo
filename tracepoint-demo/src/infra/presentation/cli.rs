@@ -39,7 +39,7 @@ pub struct CliArgs {
     pub container: Vec<String>,
 
     /// Seed all processes currently in the container at startup.
-    /// This is useful to processes to start with `docker exec`.
+    /// This helps with processes started via `docker exec` or `docker compose exec`.
     #[arg(long = "all-container-processes", requires = "container")]
     pub all_container_processes: bool,
 

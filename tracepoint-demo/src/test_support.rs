@@ -70,6 +70,7 @@ impl ContainerRuntimePort for NoopContainerRuntimePort {
     fn spawn_monitor(
         &self,
         _name_or_id: String,
+        _all_processes: bool,
         _tx: mpsc::UnboundedSender<RuntimeUpdate>,
         _index: usize,
     ) -> tokio::task::JoinHandle<()> {
@@ -101,6 +102,7 @@ impl ContainerRuntimePort for QueuedContainerRuntimePort {
     fn spawn_monitor(
         &self,
         _name_or_id: String,
+        _all_processes: bool,
         _tx: mpsc::UnboundedSender<RuntimeUpdate>,
         _index: usize,
     ) -> tokio::task::JoinHandle<()> {

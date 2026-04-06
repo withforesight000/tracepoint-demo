@@ -67,9 +67,21 @@ struct StateRuntimeUpdateHandler<'a, TReporter: StatusReporter + ?Sized> {
 impl<TReporter: StatusReporter + ?Sized> RuntimeUpdateHandler
     for StateRuntimeUpdateHandler<'_, TReporter>
 {
-    async fn apply_container_pid(&mut self, index: usize, pid: Option<u32>) -> anyhow::Result<()> {
+    async fn apply_container_pid(
+        &mut self,
+        index: usize,
+        pid: Option<u32>,
+        force_refresh: bool,
+    ) -> anyhow::Result<()> {
         let runtime = self.backend.container_runtime_mut(index)?;
-        apply_container_runtime_update(self.process_seed, self.reporter, runtime, pid).await?;
+        apply_container_runtime_update(
+            self.process_seed,
+            self.reporter,
+            runtime,
+            pid,
+            force_refresh,
+        )
+        .await?;
         self.backend.refresh_watch_pids()
     }
 
@@ -198,6 +210,7 @@ mod tests {
             Some(RuntimeUpdate::ContainerPid {
                 index: 0,
                 pid: Some(41),
+                force_refresh: false,
             }),
         )
         .await
@@ -267,6 +280,7 @@ mod tests {
             Some(RuntimeUpdate::ContainerPid {
                 index: 1,
                 pid: Some(9),
+                force_refresh: false,
             }),
         )
         .await

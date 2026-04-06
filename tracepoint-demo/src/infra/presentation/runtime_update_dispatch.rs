@@ -1,7 +1,12 @@
 use crate::usecase::port::RuntimeUpdate;
 
 pub(crate) trait RuntimeUpdateHandler {
-    async fn apply_container_pid(&mut self, index: usize, pid: Option<u32>) -> anyhow::Result<()>;
+    async fn apply_container_pid(
+        &mut self,
+        index: usize,
+        pid: Option<u32>,
+        force_refresh: bool,
+    ) -> anyhow::Result<()>;
 
     async fn apply_systemd_status(
         &mut self,
@@ -16,8 +21,14 @@ pub(crate) async fn handle_runtime_update<H: RuntimeUpdateHandler>(
     maybe_update: Option<RuntimeUpdate>,
 ) -> anyhow::Result<bool> {
     match maybe_update {
-        Some(RuntimeUpdate::ContainerPid { index, pid }) => {
-            handler.apply_container_pid(index, pid).await?;
+        Some(RuntimeUpdate::ContainerPid {
+            index,
+            pid,
+            force_refresh,
+        }) => {
+            handler
+                .apply_container_pid(index, pid, force_refresh)
+                .await?;
             Ok(true)
         }
         Some(RuntimeUpdate::SystemdStatus {
@@ -52,6 +63,7 @@ mod tests {
             &mut self,
             index: usize,
             pid: Option<u32>,
+            _force_refresh: bool,
         ) -> anyhow::Result<()> {
             if let Some(message) = self.container_error {
                 return Err(anyhow::anyhow!(message));
@@ -83,6 +95,7 @@ mod tests {
             Some(RuntimeUpdate::ContainerPid {
                 index: 2,
                 pid: Some(42),
+                force_refresh: false,
             }),
         )
         .await
@@ -153,6 +166,7 @@ mod tests {
             Some(RuntimeUpdate::ContainerPid {
                 index: 0,
                 pid: Some(11),
+                force_refresh: false,
             }),
         )
         .await

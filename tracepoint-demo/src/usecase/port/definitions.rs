@@ -38,6 +38,7 @@ pub trait ContainerRuntimePort: Send + Sync {
     fn spawn_monitor(
         &self,
         name_or_id: String,
+        all_processes: bool,
         tx: mpsc::UnboundedSender<RuntimeUpdate>,
         index: usize,
     ) -> tokio::task::JoinHandle<()>;

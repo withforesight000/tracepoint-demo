@@ -70,8 +70,9 @@ pub async fn apply_container_runtime_update<TReporter: StatusReporter + ?Sized>(
     reporter: &mut TReporter,
     runtime: &mut ContainerRuntime,
     next_pid: Option<u32>,
+    force_refresh: bool,
 ) -> anyhow::Result<()> {
-    if runtime.current_pid == next_pid {
+    if !force_refresh && runtime.current_pid == next_pid {
         return Ok(());
     }
 
@@ -103,9 +104,12 @@ pub fn spawn_monitors(
         .iter()
         .enumerate()
         .map(|(index, runtime)| {
-            runtime
-                .runtime
-                .spawn_monitor(runtime.name_or_id.clone(), update_tx.clone(), index)
+            runtime.runtime.spawn_monitor(
+                runtime.name_or_id.clone(),
+                runtime.all_processes,
+                update_tx.clone(),
+                index,
+            )
         })
         .collect()
 }
@@ -242,9 +246,59 @@ mod tests {
         };
         let mut reporter = MockStatusReporter::new();
 
-        apply_container_runtime_update(&mut process_seed, &mut reporter, &mut runtime, Some(42))
-            .await
-            .unwrap();
+        apply_container_runtime_update(
+            &mut process_seed,
+            &mut reporter,
+            &mut runtime,
+            Some(42),
+            false,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn apply_container_runtime_update_forces_refresh_when_requested() {
+        let mut process_seed = MockProcessSeedPort::new();
+        let mut cgroup_port = MockCgroupPort::new();
+        cgroup_port
+            .expect_read_cgroup_v2_path()
+            .times(1)
+            .withf(|pid| *pid == 42)
+            .return_once(|_| Ok("/demo".to_string()));
+        cgroup_port
+            .expect_read_cgroup_procs()
+            .times(1)
+            .withf(|path| path == "/demo")
+            .return_once(|_| Ok(vec![42, 99]));
+        let mut runtime = ContainerRuntime {
+            cgroup_port: Arc::new(cgroup_port),
+            runtime: Arc::new(NoopContainerRuntimePort),
+            name_or_id: "web".to_string(),
+            watch_children: false,
+            all_processes: true,
+            flags: 0x2,
+            current_pid: Some(42),
+        };
+        let mut reporter = MockStatusReporter::new();
+
+        process_seed
+            .expect_seed_direct()
+            .times(1)
+            .withf(|pids, flags| pids == [42, 99] && *flags == 0x2)
+            .return_once(|_, _| Ok(()));
+
+        apply_container_runtime_update(
+            &mut process_seed,
+            &mut reporter,
+            &mut runtime,
+            Some(42),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(runtime.current_pid, Some(42));
     }
 
     #[tokio::test]
@@ -297,9 +351,15 @@ mod tests {
             .withf(|pids, flags| pids == [77] && *flags == 0x2)
             .return_once(|_, _| Ok(()));
 
-        apply_container_runtime_update(&mut process_seed, &mut reporter, &mut runtime, Some(77))
-            .await
-            .unwrap();
+        apply_container_runtime_update(
+            &mut process_seed,
+            &mut reporter,
+            &mut runtime,
+            Some(77),
+            false,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(runtime.current_pid, Some(77));
     }

@@ -67,13 +67,13 @@ pub async fn query_container_main_pid(
 async fn monitor_container_runtime(
     docker: Docker,
     name_or_id: String,
+    all_processes: bool,
     tx: mpsc::UnboundedSender<RuntimeUpdate>,
     index: usize,
 ) -> anyhow::Result<()> {
     let query_docker = docker.clone();
     let mut filters = HashMap::new();
     filters.insert("container".to_string(), vec![name_or_id.clone()]);
-    filters.insert("type".to_string(), vec!["container".to_string()]);
     let events: BoxStream<'static, Result<EventMessage, bollard::errors::Error>> = docker
         .events(Some(EventsOptions {
             since: None,
@@ -99,14 +99,20 @@ async fn monitor_container_runtime(
                             events.next().await
                         } => {
                             match maybe_event {
-                                Some(Ok(_)) => Ok(()),
+                                // Docker exec activity does not change the container's main PID,
+                                // so all-processes mode uses exec events as a refresh trigger.
+                                Some(Ok(event)) => Ok(all_processes
+                                    && matches!(
+                                        event.action.as_deref(),
+                                        Some(action) if action.starts_with("exec_")
+                                    )),
                                 Some(Err(err)) => Err(err.into()),
                                 None => Err(anyhow::anyhow!(
                                     "Docker event stream ended while monitoring container {name_or_id}."
                                 )),
                             }
                         }
-                        _ = sleep(poll_interval) => Ok(()),
+                        _ = sleep(poll_interval) => Ok(false),
                     }
                 }
             }
@@ -132,7 +138,7 @@ async fn monitor_container_runtime_with<TWait, TWaitFuture, TQuery, TQueryFuture
 ) -> anyhow::Result<()>
 where
     TWait: FnMut() -> TWaitFuture,
-    TWaitFuture: Future<Output = anyhow::Result<()>>,
+    TWaitFuture: Future<Output = anyhow::Result<bool>>,
     TQuery: FnMut() -> TQueryFuture,
     TQueryFuture: Future<Output = anyhow::Result<Option<u32>>>,
 {
@@ -140,17 +146,19 @@ where
     let _ = tx.send(RuntimeUpdate::ContainerPid {
         index,
         pid: current_pid,
+        force_refresh: false,
     });
 
     loop {
-        wait_for_signal().await?;
+        let force_refresh = wait_for_signal().await?;
 
         let next_pid = query_main_pid().await?;
-        if next_pid != current_pid {
+        if force_refresh || next_pid != current_pid {
             current_pid = next_pid;
             let _ = tx.send(RuntimeUpdate::ContainerPid {
                 index,
                 pid: next_pid,
+                force_refresh,
             });
         }
     }
@@ -167,13 +175,20 @@ impl ContainerRuntimePort for DockerContainerRuntimeGateway {
     fn spawn_monitor(
         &self,
         name_or_id: String,
+        all_processes: bool,
         tx: mpsc::UnboundedSender<RuntimeUpdate>,
         index: usize,
     ) -> tokio::task::JoinHandle<()> {
         let docker = self.docker.clone();
         tokio::spawn(async move {
-            if let Err(err) =
-                monitor_container_runtime(docker, name_or_id.clone(), tx.clone(), index).await
+            if let Err(err) = monitor_container_runtime(
+                docker,
+                name_or_id.clone(),
+                all_processes,
+                tx.clone(),
+                index,
+            )
+            .await
             {
                 let _ = tx.send(RuntimeUpdate::MonitorError {
                     label: format!("container {name_or_id}"),
@@ -271,10 +286,10 @@ mod tests {
     #[tokio::test]
     async fn monitor_container_runtime_with_sends_initial_and_changed_pids() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let signals: Arc<Mutex<VecDeque<anyhow::Result<()>>>> =
+        let signals: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> =
             Arc::new(Mutex::new(VecDeque::from([
-                Ok(()),
-                Ok(()),
+                Ok(false),
+                Ok(false),
                 Err(anyhow::anyhow!("stop")),
             ])));
         let pids: Arc<Mutex<VecDeque<anyhow::Result<Option<u32>>>>> =
@@ -312,14 +327,69 @@ mod tests {
             updates[0],
             RuntimeUpdate::ContainerPid {
                 index: 3,
-                pid: Some(10)
+                pid: Some(10),
+                force_refresh: false
             }
         ));
         assert!(matches!(
             updates[1],
             RuntimeUpdate::ContainerPid {
                 index: 3,
-                pid: Some(20)
+                pid: Some(20),
+                force_refresh: false
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn monitor_container_runtime_with_forces_refresh_for_exec_start_events() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let signals: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> =
+            Arc::new(Mutex::new(VecDeque::from([
+                Ok(true),
+                Err(anyhow::anyhow!("stop")),
+            ])));
+        let pids: Arc<Mutex<VecDeque<anyhow::Result<Option<u32>>>>> =
+            Arc::new(Mutex::new(VecDeque::from([Ok(Some(10)), Ok(Some(10))])));
+
+        let err = monitor_container_runtime_with(
+            &tx,
+            7,
+            {
+                let signals = signals.clone();
+                move || {
+                    let signals = signals.clone();
+                    async move { signals.lock().unwrap().pop_front().unwrap() }
+                }
+            },
+            {
+                let pids = pids.clone();
+                move || {
+                    let pids = pids.clone();
+                    async move { pids.lock().unwrap().pop_front().unwrap() }
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.to_string(), "stop");
+        let updates = drain_updates(rx);
+        assert_eq!(updates.len(), 2);
+        assert!(matches!(
+            updates[0],
+            RuntimeUpdate::ContainerPid {
+                index: 7,
+                pid: Some(10),
+                force_refresh: false
+            }
+        ));
+        assert!(matches!(
+            updates[1],
+            RuntimeUpdate::ContainerPid {
+                index: 7,
+                pid: Some(10),
+                force_refresh: true
             }
         ));
     }
@@ -327,8 +397,8 @@ mod tests {
     #[tokio::test]
     async fn monitor_container_runtime_with_propagates_query_errors_after_initial_send() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let signals: Arc<Mutex<VecDeque<anyhow::Result<()>>>> =
-            Arc::new(Mutex::new(VecDeque::from([Ok(())])));
+        let signals: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> =
+            Arc::new(Mutex::new(VecDeque::from([Ok(false)])));
         let pids: Arc<Mutex<VecDeque<anyhow::Result<Option<u32>>>>> =
             Arc::new(Mutex::new(VecDeque::from([
                 Ok(Some(10)),
@@ -363,7 +433,8 @@ mod tests {
             updates[0],
             RuntimeUpdate::ContainerPid {
                 index: 1,
-                pid: Some(10)
+                pid: Some(10),
+                force_refresh: false
             }
         ));
     }
