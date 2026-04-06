@@ -6,7 +6,9 @@ This file is a guide for AI agents operating on this repository.
 
 - `README.md` for user-facing behavior, build, run, and output examples.
 - `.agents/skills/tracepoint-demo-layered-architecture/SKILL.md` for the canonical layered-architecture rules and change-location shortcuts.
+- `.agents/skills/tracepoint-demo-ebpf-implementation/SKILL.md` for kernel-side implementation rules, shared ABI guardrails, and change-location shortcuts inside `tracepoint-demo-ebpf/`.
 - `.github/skills/tracepoint-demo-layered-architecture/SKILL.md` only for Copilot compatibility if the agent does not scan `.agents/skills`.
+- `.github/skills/tracepoint-demo-ebpf-implementation/SKILL.md` only for Copilot compatibility if the agent does not scan `.agents/skills`.
 - `doc/design.md` when you need architectural rationale, file mapping, or the runtime interaction trace.
 
 ## Project overview
@@ -30,6 +32,7 @@ Targets can be selected by PID, TTY, Docker container, or systemd unit.
 - Treat `tracepoint-demo-common` as the ABI boundary between userspace and eBPF.
 - If code behavior changes, update `README.md` for users and `doc/design.md` for architecture notes in the same change.
 - For dependency-direction and ownership questions, follow `.agents/skills/tracepoint-demo-layered-architecture/SKILL.md`.
+- For kernel-side implementation questions, follow `.agents/skills/tracepoint-demo-ebpf-implementation/SKILL.md`.
 
 ## Architecture guardrails
 
@@ -86,7 +89,7 @@ cargo tarpaulin --skip-clean -p tracepoint-demo --lib \
 
 ## eBPF constraints
 
-- See `.agents/skills/tracepoint-demo-layered-architecture/SKILL.md`.
+- See `.agents/skills/tracepoint-demo-ebpf-implementation/SKILL.md`.
 
 ## BTF bindings
 
