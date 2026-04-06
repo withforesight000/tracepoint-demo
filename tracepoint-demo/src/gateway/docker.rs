@@ -17,6 +17,11 @@ use crate::usecase::port::{
     BoxFuture, ContainerRuntimePort, RuntimeUpdate, SharedContainerRuntimePort,
 };
 
+enum ContainerMonitorSignal {
+    Poll,
+    Refresh,
+}
+
 struct DockerContainerRuntimeGateway {
     docker: Docker,
 }
@@ -100,19 +105,27 @@ async fn monitor_container_runtime(
                         } => {
                             match maybe_event {
                                 // Docker exec activity does not change the container's main PID,
-                                // so all-processes mode uses exec events as a refresh trigger.
-                                Some(Ok(event)) => Ok(all_processes
+                                // so all-processes mode uses exec start/create events as a refresh
+                                // trigger and reuses the cached PID instead of re-inspecting Docker.
+                                Some(Ok(event)) => Ok(if all_processes
                                     && matches!(
                                         event.action.as_deref(),
-                                        Some(action) if action.starts_with("exec_")
-                                    )),
+                                        Some(action)
+                                            if action.starts_with("exec_create")
+                                                || action.starts_with("exec_start")
+                                    )
+                                {
+                                    ContainerMonitorSignal::Refresh
+                                } else {
+                                    ContainerMonitorSignal::Poll
+                                }),
                                 Some(Err(err)) => Err(err.into()),
                                 None => Err(anyhow::anyhow!(
                                     "Docker event stream ended while monitoring container {name_or_id}."
                                 )),
                             }
                         }
-                        _ = sleep(poll_interval) => Ok(false),
+                        _ = sleep(poll_interval) => Ok(ContainerMonitorSignal::Poll),
                     }
                 }
             }
@@ -138,7 +151,7 @@ async fn monitor_container_runtime_with<TWait, TWaitFuture, TQuery, TQueryFuture
 ) -> anyhow::Result<()>
 where
     TWait: FnMut() -> TWaitFuture,
-    TWaitFuture: Future<Output = anyhow::Result<bool>>,
+    TWaitFuture: Future<Output = anyhow::Result<ContainerMonitorSignal>>,
     TQuery: FnMut() -> TQueryFuture,
     TQueryFuture: Future<Output = anyhow::Result<Option<u32>>>,
 {
@@ -150,16 +163,25 @@ where
     });
 
     loop {
-        let force_refresh = wait_for_signal().await?;
-
-        let next_pid = query_main_pid().await?;
-        if force_refresh || next_pid != current_pid {
-            current_pid = next_pid;
-            let _ = tx.send(RuntimeUpdate::ContainerPid {
-                index,
-                pid: next_pid,
-                force_refresh,
-            });
+        match wait_for_signal().await? {
+            ContainerMonitorSignal::Refresh => {
+                let _ = tx.send(RuntimeUpdate::ContainerPid {
+                    index,
+                    pid: current_pid,
+                    force_refresh: true,
+                });
+            }
+            ContainerMonitorSignal::Poll => {
+                let next_pid = query_main_pid().await?;
+                if next_pid != current_pid {
+                    current_pid = next_pid;
+                    let _ = tx.send(RuntimeUpdate::ContainerPid {
+                        index,
+                        pid: next_pid,
+                        force_refresh: false,
+                    });
+                }
+            }
         }
     }
 }
@@ -286,10 +308,10 @@ mod tests {
     #[tokio::test]
     async fn monitor_container_runtime_with_sends_initial_and_changed_pids() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let signals: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> =
+        let signals: Arc<Mutex<VecDeque<anyhow::Result<ContainerMonitorSignal>>>> =
             Arc::new(Mutex::new(VecDeque::from([
-                Ok(false),
-                Ok(false),
+                Ok(ContainerMonitorSignal::Poll),
+                Ok(ContainerMonitorSignal::Poll),
                 Err(anyhow::anyhow!("stop")),
             ])));
         let pids: Arc<Mutex<VecDeque<anyhow::Result<Option<u32>>>>> =
@@ -344,13 +366,13 @@ mod tests {
     #[tokio::test]
     async fn monitor_container_runtime_with_forces_refresh_for_exec_start_events() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let signals: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> =
+        let signals: Arc<Mutex<VecDeque<anyhow::Result<ContainerMonitorSignal>>>> =
             Arc::new(Mutex::new(VecDeque::from([
-                Ok(true),
+                Ok(ContainerMonitorSignal::Refresh),
                 Err(anyhow::anyhow!("stop")),
             ])));
         let pids: Arc<Mutex<VecDeque<anyhow::Result<Option<u32>>>>> =
-            Arc::new(Mutex::new(VecDeque::from([Ok(Some(10)), Ok(Some(10))])));
+            Arc::new(Mutex::new(VecDeque::from([Ok(Some(10))])));
 
         let err = monitor_container_runtime_with(
             &tx,
@@ -397,8 +419,9 @@ mod tests {
     #[tokio::test]
     async fn monitor_container_runtime_with_propagates_query_errors_after_initial_send() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let signals: Arc<Mutex<VecDeque<anyhow::Result<bool>>>> =
-            Arc::new(Mutex::new(VecDeque::from([Ok(false)])));
+        let signals: Arc<Mutex<VecDeque<anyhow::Result<ContainerMonitorSignal>>>> = Arc::new(
+            Mutex::new(VecDeque::from([Ok(ContainerMonitorSignal::Poll)])),
+        );
         let pids: Arc<Mutex<VecDeque<anyhow::Result<Option<u32>>>>> =
             Arc::new(Mutex::new(VecDeque::from([
                 Ok(Some(10)),
