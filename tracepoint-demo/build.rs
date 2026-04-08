@@ -23,5 +23,7 @@ fn main() -> anyhow::Result<()> {
             .as_str(),
         ..Default::default()
     };
+    // Compile the kernel-side crate during the userspace build so its generated object is
+    // available under this package's `OUT_DIR` when `src/gateway/ebpf.rs` is compiled.
     aya_build::build_ebpf([ebpf_package], Toolchain::default())
 }

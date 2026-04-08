@@ -110,6 +110,20 @@ pub fn attach_tracepoint_programs(ebpf: &mut Ebpf) -> anyhow::Result<()> {
 pub fn load_tracepoint_demo_ebpf() -> anyhow::Result<Ebpf> {
     bump_memlock_rlimit();
 
+    // Runtime path:
+    // - `load_tracepoint_demo_ebpf()` runs when the daemon starts.
+    // - It does not read the eBPF object from disk itself.
+    //
+    // Compile-time path:
+    // 1. `build.rs` compiles `tracepoint-demo-ebpf` and writes the resulting object into this
+    //    package's `OUT_DIR`.
+    // 2. `env!("OUT_DIR")` is expanded by `rustc` while compiling `tracepoint-demo`.
+    // 3. `include_bytes_aligned!(...)` is a macro, and `rustc` expands it during compilation.
+    //    It reads that generated object file at that time and bakes its bytes into the userspace
+    //    ELF as a `&'static [u8]`.
+    //
+    // By the time this function runs, the only remaining work is to hand that embedded byte slice
+    // to `Ebpf::load(...)`.
     let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/tracepoint-demo"
@@ -135,6 +149,7 @@ pub fn seed_proc_state_from_task_iter(
     tty_filters: &HashSet<String>,
     watch_flags: u32,
 ) -> anyhow::Result<Vec<u32>> {
+    // structure of buf: [TaskRel][TaskRel]...
     let mut buf = Vec::new();
     {
         let program: &mut Iter = ebpf.program_mut("iter_tasks").unwrap().try_into()?;
