@@ -1,6 +1,7 @@
 use crate::usecase::port::RuntimeUpdate;
 
-pub(crate) trait RuntimeUpdateHandler {
+#[allow(async_fn_in_trait)]
+pub trait RuntimeUpdateHandler {
     async fn apply_container_pid(
         &mut self,
         index: usize,
@@ -17,7 +18,7 @@ pub(crate) trait RuntimeUpdateHandler {
     ) -> anyhow::Result<()>;
 }
 
-pub(crate) async fn handle_runtime_update<H: RuntimeUpdateHandler>(
+pub async fn handle_runtime_update<H: RuntimeUpdateHandler>(
     handler: &mut H,
     maybe_update: Option<RuntimeUpdate>,
 ) -> anyhow::Result<bool> {

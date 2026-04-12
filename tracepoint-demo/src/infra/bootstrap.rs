@@ -33,6 +33,17 @@ pub async fn run() -> anyhow::Result<()> {
     )
     .await?;
 
+    // Use an unbounded channel here instead of `mpsc::channel(capacity)` because these updates
+    // are small status notifications from container/systemd monitor tasks, not a high-volume data
+    // stream.
+    //
+    // The monitor tasks send updates with synchronous `tx.send(...)` calls, so using a bounded
+    // channel would force us to choose a capacity and decide what to do when the buffer fills
+    // up. In this code path we do not want monitor tasks to block on channel backpressure or to
+    // start dropping updates just because an arbitrary bound was hit.
+    //
+    // The runtime loop has a single consumer and is already responsible for processing these
+    // updates in order, so an unbounded `mpsc` is the simplest fit.
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel();
     let has_monitors =
         !trace_selected_targets::spawn_monitors(&prepared.state, &update_tx).is_empty();

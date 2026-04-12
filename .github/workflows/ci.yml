@@ -14,7 +14,6 @@ concurrency:
 
 env:
   CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: env
   CARGO_TERM_COLOR: always
 
 jobs:
@@ -52,5 +51,8 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
-      - name: Run userspace unit tests
-        run: cargo test -p tracepoint-demo --lib --target x86_64-unknown-linux-gnu
+      - name: Run userspace tests
+        run: cargo test -p tracepoint-demo
+
+      - name: Run eBPF helper tests
+        run: cargo test -p tracepoint-demo-ebpf --lib

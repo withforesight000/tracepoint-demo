@@ -19,7 +19,7 @@ pub struct SystemdRuntime {
     pub current_running: bool,
 }
 
-pub(crate) struct SystemdSeedSpec<'a> {
+pub struct SystemdSeedSpec<'a> {
     pub unit_name: &'a str,
     pub main_pid: Option<u32>,
     pub flags: u32,

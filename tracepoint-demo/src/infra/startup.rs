@@ -136,7 +136,7 @@ impl<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> StartupPrepar
     }
 }
 
-fn collect_target_descriptions(
+pub fn collect_target_descriptions(
     container_runtimes: &[ContainerRuntime],
     systemd_runtimes: &[SystemdRuntime],
     all_container_processes: bool,

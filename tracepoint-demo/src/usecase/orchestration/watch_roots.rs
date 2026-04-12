@@ -1,5 +1,7 @@
 use std::collections::HashMap as StdHashMap;
 
+use aya::maps::{MapData, hash_map::HashMap as UserHashMap};
+
 pub fn add_watch_root(watch_roots: &mut StdHashMap<u32, u32>, pid: u32, flags: u32) {
     watch_roots
         .entry(pid)
@@ -88,14 +90,30 @@ pub fn collect_watch_roots(
     roots
 }
 
-pub fn sync_watch_pids(
-    watch_pids: &mut aya::maps::hash_map::HashMap<aya::maps::MapData, u32, u32>,
+pub trait WatchPidStore {
+    fn remove_watch_pid(&mut self, pid: u32) -> anyhow::Result<()>;
+
+    fn upsert_watch_pid(&mut self, pid: u32, flags: u32) -> anyhow::Result<()>;
+}
+
+impl WatchPidStore for UserHashMap<MapData, u32, u32> {
+    fn remove_watch_pid(&mut self, pid: u32) -> anyhow::Result<()> {
+        self.remove(&pid).map_err(Into::into)
+    }
+
+    fn upsert_watch_pid(&mut self, pid: u32, flags: u32) -> anyhow::Result<()> {
+        self.insert(pid, flags, 0).map_err(Into::into)
+    }
+}
+
+pub fn sync_watch_pids<S: WatchPidStore>(
+    watch_pids: &mut S,
     current_roots: &mut StdHashMap<u32, u32>,
     desired_roots: &StdHashMap<u32, u32>,
 ) -> anyhow::Result<()> {
     apply_watch_root_changes(current_roots, desired_roots, |change| match change {
-        WatchRootChange::Remove(pid) => watch_pids.remove(&pid).map_err(Into::into),
-        WatchRootChange::Upsert(pid, flags) => watch_pids.insert(pid, flags, 0).map_err(Into::into),
+        WatchRootChange::Remove(pid) => watch_pids.remove_watch_pid(pid),
+        WatchRootChange::Upsert(pid, flags) => watch_pids.upsert_watch_pid(pid, flags),
     })
 }
 

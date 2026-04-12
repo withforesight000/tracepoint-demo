@@ -17,7 +17,7 @@ pub struct ContainerRuntime {
     pub current_pid: Option<u32>,
 }
 
-pub(crate) struct ContainerSeedSpec<'a> {
+pub struct ContainerSeedSpec<'a> {
     pub name_or_id: &'a str,
     pub main_pid: u32,
     pub flags: u32,

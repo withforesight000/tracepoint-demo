@@ -1,7 +1,7 @@
 use std::collections::{HashMap as StdHashMap, HashSet};
 
 #[derive(Debug)]
-pub(crate) struct StartupRuntimePlan<TContainerRuntime, TSystemdRuntime> {
+pub struct StartupRuntimePlan<TContainerRuntime, TSystemdRuntime> {
     pub static_watch_roots: StdHashMap<u32, u32>,
     pub current_watch_roots: StdHashMap<u32, u32>,
     pub container_runtimes: Vec<TContainerRuntime>,
@@ -9,7 +9,7 @@ pub(crate) struct StartupRuntimePlan<TContainerRuntime, TSystemdRuntime> {
     pub target_descriptions: Vec<String>,
 }
 
-pub(crate) struct StartupPrepareInputs<'a> {
+pub struct StartupPrepareInputs<'a> {
     pub pids: &'a [u32],
     pub tty_inputs: &'a [String],
     pub tty_filters: &'a HashSet<String>,
@@ -22,7 +22,8 @@ pub(crate) struct StartupPrepareInputs<'a> {
     pub container_runtime_available: bool,
     pub systemd_runtime_available: bool,
 }
-pub(crate) trait StartupPrepareBackend {
+#[allow(async_fn_in_trait)]
+pub trait StartupPrepareBackend {
     type ContainerRuntime;
     type SystemdRuntime;
 
@@ -65,7 +66,7 @@ pub(crate) trait StartupPrepareBackend {
     ) -> Vec<String>;
 }
 
-pub(crate) async fn prepare_runtime_plan<TBackend: StartupPrepareBackend>(
+pub async fn prepare_runtime_plan<TBackend: StartupPrepareBackend>(
     backend: &mut TBackend,
     inputs: StartupPrepareInputs<'_>,
 ) -> anyhow::Result<StartupRuntimePlan<TBackend::ContainerRuntime, TBackend::SystemdRuntime>> {

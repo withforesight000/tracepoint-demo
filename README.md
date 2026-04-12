@@ -76,14 +76,18 @@ sudo cargo run --release -- --systemd-unit sshd.service --systemd-unit user@1000
 
 ## Testing and coverage
 
-Unit tests:
+Tests:
 
 ```bash
-cargo test -p tracepoint-demo --lib
+cargo test -p tracepoint-demo
+cargo test -p tracepoint-demo-ebpf --lib
 ```
 
-The crate keeps shared test support in `tracepoint-demo/src/test_support.rs` so repeated fakes
-stay consistent across policy and orchestration tests.
+The first command covers userspace unit tests and integration tests. The second command covers the
+lightweight helper tests in `tracepoint-demo-ebpf/src/lib.rs`.
+
+The crate keeps shared test support in `tracepoint-demo/src/test_support.rs` so repeated fakes stay
+consistent across policy and orchestration tests.
 
 Static checks:
 

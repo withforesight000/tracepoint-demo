@@ -17,7 +17,7 @@ use crate::usecase::{
     },
 };
 
-pub(crate) struct StaticWatchRootsSpec<'a> {
+pub struct StaticWatchRootsSpec<'a> {
     pub pids: &'a [u32],
     pub tty_filters: &'a HashSet<String>,
     pub tty_inputs: &'a [String],
@@ -25,7 +25,7 @@ pub(crate) struct StaticWatchRootsSpec<'a> {
     pub has_runtime_targets: bool,
 }
 
-pub(crate) async fn collect_static_watch_roots<
+pub async fn collect_static_watch_roots<
     TReporter: StatusReporter + ?Sized,
     TWait: WaitPort + ?Sized,
 >(
@@ -64,7 +64,7 @@ pub(crate) async fn collect_static_watch_roots<
     Ok(static_watch_roots)
 }
 
-pub(crate) async fn initialize_container_runtimes<TReporter: StatusReporter + ?Sized>(
+pub async fn initialize_container_runtimes<TReporter: StatusReporter + ?Sized>(
     process_seed: &mut dyn ProcessSeedPort,
     cgroup_port: &SharedCgroupPort,
     reporter: &mut TReporter,
@@ -122,7 +122,7 @@ pub(crate) async fn initialize_container_runtimes<TReporter: StatusReporter + ?S
     Ok(container_runtimes)
 }
 
-pub(crate) async fn initialize_systemd_runtimes<
+pub async fn initialize_systemd_runtimes<
     TReporter: StatusReporter + ?Sized,
     TWait: WaitPort + ?Sized,
 >(

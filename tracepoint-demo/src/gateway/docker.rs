@@ -209,6 +209,41 @@ async fn monitor_container_runtime(
     let update_tx = tx.clone();
     let mut filters = HashMap::new();
     filters.insert("container".to_string(), vec![name_or_id.clone()]);
+    // NOTE:
+    // `docker.events(...)` returns `impl Stream<Item = Result<EventMessage, Error>>`.
+    //
+    // In Bollard, that `impl Stream` is not a named public type. Internally it is
+    // built from a chain of stream combinators and a `Box::pin(...)` around that
+    // chain. The concrete type is therefore intentionally hidden from callers.
+    //
+    // We call `.boxed()` here for a separate reason: to erase the anonymous stream
+    // type into `BoxStream<'static, _>`, which is just:
+    //   `Pin<Box<dyn Stream<Item = T> + Send + 'a>>`
+    //
+    // `Box` puts the stream on the heap so the value has a stable address, and
+    // `Pin` tells Rust that the boxed stream must not be moved after it has been
+    // pinned. That matters because `Stream::poll_next` takes `Pin<&mut Self>`, so
+    // poll-based async code is allowed to rely on the stream staying at the same
+    // address while it is being driven. Without `Pin`, a stream implementation that
+    // contains self-references or other address-sensitive state could be moved after
+    // it had been partially polled, which would make those internal references
+    // invalid and break the safety guarantees that the async/stream machinery
+    // depends on.
+    //
+    // That makes the value easier to name, store in `Arc<Mutex<_>>`, and move into
+    // the closures below without dragging the full concrete type through this
+    // function. In other words, this is type erasure for convenience, not a
+    // behavioral requirement.
+    //
+    // If you need to understand this again later, trace the definitions in this
+    // order:
+    //   1. `bollard::Docker::events(...)`
+    //   2. `bollard::Docker::process_into_stream(...)`
+    //   3. `bollard::Docker::decode_into_stream(...)`
+    //   4. `futures_core::stream::BoxStream`
+    //
+    // The stream itself is still the same runtime event stream from Docker; only
+    // the Rust type used to hold it has been erased.
     let events: BoxStream<'static, Result<EventMessage, bollard::errors::Error>> = docker
         .events(Some(EventsOptions {
             since: None,
@@ -221,6 +256,27 @@ async fn monitor_container_runtime(
     monitor_container_runtime_with(
         &tx,
         index,
+        // The outer `clone()` calls below are not the same thing as `move`.
+        //
+        // `let events = events.clone();` means "borrow the outer `events`
+        // immutably for the duration of the method call, create a new owned
+        // handle, then bind that new handle to the inner name `events`."
+        // In other words, the right-hand side is effectively `Clone::clone(&events)`.
+        //
+        // The reason we do this before `move || { ... }` is that the closure
+        // needs to capture its own owned copies. Once the closure is created,
+        // the values it captures are moved into the closure environment.
+        //
+        // That distinction matters:
+        // - reading a captured value usually gives the closure an immutable
+        //   borrow of the original value,
+        // - mutating a captured value usually gives the closure a mutable
+        //   borrow,
+        // - `move` forces the closure to take ownership of the captured value.
+        //
+        // Here we want ownership inside the closure, but we do not want to move
+        // the original outer variables out of this scope yet. So we clone first,
+        // then move the cloned handles into the closure.
         {
             let events = events.clone();
             let name_or_id = name_or_id.clone();
@@ -232,6 +288,17 @@ async fn monitor_container_runtime(
                 let query_docker = query_docker.clone();
                 let update_tx = update_tx.clone();
                 async move {
+                    // This `select!` is a small event loop with a timeout fallback.
+                    //
+                    // The first branch waits for the Docker event stream to yield an
+                    // item. The second branch is a periodic sleep that lets us poll
+                    // the container state even when no relevant Docker event arrives.
+                    //
+                    // `biased;` makes the branch order significant: the event branch
+                    // is checked first, and the timer is only used as a fallback.
+                    // That matches the intent here, which is to react to Docker
+                    // events as soon as possible and only poll when the stream is
+                    // quiet.
                     select! {
                         biased;
                         maybe_event = async {
