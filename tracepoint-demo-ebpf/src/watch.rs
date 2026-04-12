@@ -1,4 +1,5 @@
-use aya_ebpf::helpers::bpf_get_current_task;
+use aya_ebpf::helpers::{bpf_get_current_task, bpf_probe_read_kernel};
+use core::ptr;
 
 use crate::{
     maps::{PROC_STATE, WATCH_PIDS},
@@ -22,7 +23,22 @@ pub(crate) unsafe fn lookup_watch_flags(pid: u32) -> Option<u32> {
     None
 }
 
-unsafe fn lookup_watch_flags_from_task_lineage() -> Option<u32> {
+unsafe fn read_task_tgid(task: *mut task_struct) -> Option<u32> {
+    let pid = unsafe { bpf_probe_read_kernel(ptr::addr_of!((*task).tgid)) }.ok()?;
+    Some(pid as u32)
+}
+
+unsafe fn read_task_parent(task: *mut task_struct) -> Option<*mut task_struct> {
+    let parent = unsafe { bpf_probe_read_kernel(ptr::addr_of!((*task).parent)) }.ok()?;
+    (!parent.is_null()).then_some(parent)
+}
+
+unsafe fn read_task_real_parent(task: *mut task_struct) -> Option<*mut task_struct> {
+    let real_parent = unsafe { bpf_probe_read_kernel(ptr::addr_of!((*task).real_parent)) }.ok()?;
+    (!real_parent.is_null()).then_some(real_parent)
+}
+
+unsafe fn lookup_watch_flags_from_task_lineage(current_pid: u32) -> Option<u32> {
     // Use the older helper here so the tracepoint program keeps loading on
     // kernels that reject bpf_get_current_task_btf in this program type.
     let mut task = unsafe { bpf_get_current_task() as *mut task_struct };
@@ -30,21 +46,19 @@ unsafe fn lookup_watch_flags_from_task_lineage() -> Option<u32> {
         return None;
     }
 
+    let mut pid = current_pid;
     let mut depth = 0;
     while depth < MAX_LINEAGE_DEPTH {
-        let pid = unsafe { (*task).tgid as u32 };
-        let parent = unsafe { (*task).parent };
-        let parent_pid = if !parent.is_null() && parent != task {
-            Some(unsafe { (*parent).tgid as u32 })
-        } else {
-            None
+        let parent = unsafe { read_task_parent(task) };
+        let parent_pid = match parent {
+            Some(parent) if parent != task => unsafe { read_task_tgid(parent) },
+            _ => None,
         };
 
-        let real_parent = unsafe { (*task).real_parent };
-        let real_parent_pid = if !real_parent.is_null() && real_parent != task {
-            Some(unsafe { (*real_parent).tgid as u32 })
-        } else {
-            None
+        let real_parent = unsafe { read_task_real_parent(task) };
+        let real_parent_pid = match real_parent {
+            Some(real_parent) if real_parent != task => unsafe { read_task_tgid(real_parent) },
+            _ => None,
         };
 
         if let Some(flags) =
@@ -60,8 +74,16 @@ unsafe fn lookup_watch_flags_from_task_lineage() -> Option<u32> {
             Some(LineageHop::RealParent) => real_parent,
             None => break,
         };
+        let next_task = match next_task {
+            Some(next_task) => next_task,
+            None => break,
+        };
 
         task = next_task;
+        pid = match unsafe { read_task_tgid(task) } {
+            Some(pid) => pid,
+            None => break,
+        };
         depth += 1;
     }
 
@@ -73,7 +95,7 @@ pub(crate) unsafe fn resolve_watch_flags(pid: u32) -> Option<u32> {
         return Some(flags);
     }
 
-    let flags = match unsafe { lookup_watch_flags_from_task_lineage() } {
+    let flags = match unsafe { lookup_watch_flags_from_task_lineage(pid) } {
         Some(flags) => flags,
         None => return None,
     };
