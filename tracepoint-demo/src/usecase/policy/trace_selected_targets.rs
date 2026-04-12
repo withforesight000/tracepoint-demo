@@ -76,6 +76,7 @@ mod tests {
             watch_children: true,
             all_processes: false,
             flags: 0x1,
+            seeded_pids: Vec::new(),
             current_pid: Some(10),
         }];
         let systemd_runtimes = vec![SystemdRuntime {

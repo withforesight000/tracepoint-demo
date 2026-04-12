@@ -19,6 +19,7 @@ pub async fn run(
     ebpf: &mut Ebpf,
     state: &mut AppState,
     update_rx: &mut mpsc::UnboundedReceiver<RuntimeUpdate>,
+    startup_watch_pid_labels: &[String],
     tty_inputs: &[String],
     watch_children: bool,
     target_descriptions: &[String],
@@ -27,11 +28,7 @@ pub async fn run(
     let mut reporter = ConsoleStatusReporter;
 
     print_startup_notice(
-        &state
-            .current_watch_roots
-            .keys()
-            .copied()
-            .collect::<Vec<_>>(),
+        startup_watch_pid_labels,
         tty_inputs,
         watch_children,
         target_descriptions,

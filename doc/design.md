@@ -222,9 +222,11 @@ the Docker exec handoff do not accidentally evict the interactive shell from `PR
 When Docker briefly reports a running container with no usable PID, the startup path treats that
 as "not ready yet" and retries through the normal monitor loop instead of aborting.
 
-When `--all-systemd-processes` is enabled, systemd unit startup descriptions include the current
-PID list resolved from the unit so the startup banner reflects the full seed set, not just the
-main PID.
+When `--all-systemd-processes` or `--all-container-processes` is enabled, the startup banner folds
+the resolved seed set into the main `PIDs:` list instead of appending a separate `pids=[...]`
+suffix. Runtime targets mark the main process as `main=...` and list additional seeded processes
+as `pid=...`, so the banner shows the distinguished main PID and the rest of the watched seed set
+in one place without repeating equivalent namespace information.
 
 This tracer still only sees `execve` syscalls. Shell builtins like `cd`, `pwd`, and `echo` do not
 produce output; external commands launched from an interactive shell do.

@@ -19,6 +19,7 @@ pub struct AppState {
 pub struct PreparedApp {
     pub ebpf: Ebpf,
     pub state: AppState,
+    pub startup_watch_pid_labels: Vec<String>,
     pub tty_inputs: Vec<String>,
     pub watch_children: bool,
     pub target_descriptions: Vec<String>,

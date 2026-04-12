@@ -170,6 +170,7 @@ mod tests {
             watch_children: false,
             all_processes: false,
             flags: 0x3,
+            seeded_pids: current_pid.into_iter().collect(),
             current_pid,
         }
     }

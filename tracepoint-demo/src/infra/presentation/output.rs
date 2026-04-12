@@ -3,7 +3,7 @@ use tracepoint_demo_common::ExecEvent;
 use crate::{gateway::ebpf::cstr_from_u8, usecase::port::StatusReporter};
 
 fn startup_notice_message(
-    watched_root_pids: &[u32],
+    watched_root_pids: &[String],
     tty_inputs: &[String],
     watch_children: bool,
     target_descriptions: &[String],
@@ -18,13 +18,14 @@ fn startup_notice_message(
     } else {
         format!(" {}", target_descriptions.join(" "))
     };
+    let formatted_roots = format!("[{}]", watched_root_pids.join(", "));
     let has_roots = !watched_root_pids.is_empty();
 
     if tty_inputs.is_empty() {
         if has_roots {
             format!(
-                "Watching execve syscalls for PIDs: {:?} ({}){} (Ctrl-C to exit)",
-                watched_root_pids, child_status, target_suffix
+                "Watching execve syscalls for PIDs: {} ({}){} (Ctrl-C to exit)",
+                formatted_roots, child_status, target_suffix
             )
         } else {
             format!(
@@ -34,8 +35,8 @@ fn startup_notice_message(
         }
     } else if has_roots {
         format!(
-            "Watching execve syscalls for PIDs: {:?} (TTY filters: {:?}) ({}){} (Ctrl-C to exit)",
-            watched_root_pids, tty_inputs, child_status, target_suffix
+            "Watching execve syscalls for PIDs: {} (TTY filters: {:?}) ({}){} (Ctrl-C to exit)",
+            formatted_roots, tty_inputs, child_status, target_suffix
         )
     } else {
         format!(
@@ -82,7 +83,7 @@ impl StatusReporter for ConsoleStatusReporter {
 }
 
 pub fn print_startup_notice(
-    watched_root_pids: &[u32],
+    watched_root_pids: &[String],
     tty_inputs: &[String],
     watch_children: bool,
     target_descriptions: &[String],
@@ -117,7 +118,7 @@ mod tests {
     #[test]
     fn startup_notice_message_with_roots_and_targets() {
         let message = startup_notice_message(
-            &[1, 2, 3],
+            &["1".to_string(), "2".to_string(), "3".to_string()],
             &[],
             true,
             &[
@@ -145,7 +146,7 @@ mod tests {
     #[test]
     fn startup_notice_message_with_tty_and_roots() {
         let message = startup_notice_message(
-            &[4],
+            &["pid=4".to_string()],
             &["tty1".to_string(), "pts2".to_string()],
             true,
             &["tty=tty1".to_string()],
@@ -153,7 +154,7 @@ mod tests {
 
         assert_eq!(
             message,
-            "Watching execve syscalls for PIDs: [4] (TTY filters: [\"tty1\", \"pts2\"]) (watch_children=on) tty=tty1 (Ctrl-C to exit)"
+            "Watching execve syscalls for PIDs: [pid=4] (TTY filters: [\"tty1\", \"pts2\"]) (watch_children=on) tty=tty1 (Ctrl-C to exit)"
         );
     }
 
@@ -209,7 +210,7 @@ mod tests {
     #[test]
     fn print_functions_delegate_to_message_helpers() {
         print_startup_notice(
-            &[7],
+            &["pid=7".to_string()],
             &["pts7".to_string()],
             true,
             &["containers=[api]".to_string()],

@@ -136,6 +136,64 @@ impl<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> StartupPrepar
     }
 }
 
+fn format_runtime_pid_labels(
+    scope: &str,
+    name: &str,
+    current_pid: Option<u32>,
+    seeded_pids: &[u32],
+) -> Vec<String> {
+    let mut labels = Vec::new();
+    let mut pids = seeded_pids.to_vec();
+    pids.sort_unstable();
+    pids.dedup();
+
+    if let Some(pid) = current_pid {
+        labels.push(format!("{scope}:{name}:main={pid}"));
+        pids.retain(|candidate| *candidate != pid);
+    }
+
+    labels.extend(
+        pids
+            .into_iter()
+            .map(|pid| format!("{scope}:{name}:pid={pid}")),
+    );
+    labels
+}
+
+pub fn collect_startup_watch_pid_labels(
+    static_watch_roots: &StdHashMap<u32, u32>,
+    container_runtimes: &[ContainerRuntime],
+    systemd_runtimes: &[SystemdRuntime],
+) -> Vec<String> {
+    let mut static_root_pids = static_watch_roots.keys().copied().collect::<Vec<_>>();
+    static_root_pids.sort_unstable();
+
+    let mut pid_labels = static_root_pids
+        .into_iter()
+        .map(|pid| format!("pid={pid}"))
+        .collect::<Vec<_>>();
+
+    for runtime in container_runtimes {
+        pid_labels.extend(format_runtime_pid_labels(
+            "container",
+            &runtime.name_or_id,
+            runtime.current_pid,
+            &runtime.seeded_pids,
+        ));
+    }
+
+    for runtime in systemd_runtimes {
+        pid_labels.extend(format_runtime_pid_labels(
+            "systemd",
+            &runtime.unit_name,
+            runtime.current_pid,
+            &runtime.seeded_pids,
+        ));
+    }
+
+    pid_labels
+}
+
 pub fn collect_target_descriptions(
     container_runtimes: &[ContainerRuntime],
     systemd_runtimes: &[SystemdRuntime],
@@ -162,21 +220,7 @@ pub fn collect_target_descriptions(
             .collect::<Vec<_>>()
             .join(", ");
         if all_systemd_processes {
-            let mut seeded_pids = systemd_runtimes
-                .iter()
-                .flat_map(|runtime| runtime.seeded_pids.iter().copied())
-                .collect::<Vec<_>>();
-            seeded_pids.sort_unstable();
-            seeded_pids.dedup();
-
-            if seeded_pids.is_empty() {
-                target_descriptions.push(format!("systemd-units=[{}] seed=all-procs", unit_list));
-            } else {
-                target_descriptions.push(format!(
-                    "systemd-units=[{}] seed=all-procs pids={:?}",
-                    unit_list, seeded_pids
-                ));
-            }
+            target_descriptions.push(format!("systemd-units=[{}] seed=all-procs", unit_list));
         } else {
             target_descriptions.push(format!("systemd-units=[{}]", unit_list));
         }
@@ -249,6 +293,11 @@ pub async fn prepare_prepared_app<TReporter: StatusReporter + ?Sized, TWait: Wai
         },
     )
     .await?;
+    let startup_watch_pid_labels = collect_startup_watch_pid_labels(
+        &plan.static_watch_roots,
+        &plan.container_runtimes,
+        &plan.systemd_runtimes,
+    );
 
     let watch_pids = build_watch_pids(&mut ebpf, &plan.current_watch_roots)?;
 
@@ -263,6 +312,7 @@ pub async fn prepare_prepared_app<TReporter: StatusReporter + ?Sized, TWait: Wai
     Ok(PreparedApp {
         ebpf,
         state,
+        startup_watch_pid_labels,
         tty_inputs,
         watch_children,
         target_descriptions: plan.target_descriptions,
@@ -291,6 +341,7 @@ mod tests {
             watch_children: false,
             all_processes: false,
             flags: 1,
+            seeded_pids: vec![1],
             current_pid: Some(1),
         };
         let systemd_runtime = SystemdRuntime {
@@ -318,6 +369,7 @@ mod tests {
             watch_children: true,
             all_processes: true,
             flags: 1,
+            seeded_pids: vec![1, 3],
             current_pid: Some(1),
         };
 
@@ -341,9 +393,47 @@ mod tests {
 
         let desc = collect_target_descriptions(&[], &[systemd_runtime], false, true);
 
+        assert_eq!(desc, vec!["systemd-units=[svc] seed=all-procs".to_string()]);
+    }
+
+    #[test]
+    fn collect_startup_watch_pid_labels_marks_main_and_seeded_runtime_pids() {
+        let container = ContainerRuntime {
+            cgroup_port: Arc::new(crate::gateway::procfs::ProcfsCgroupPort),
+            runtime: Arc::new(NoopContainerRuntimePort),
+            name_or_id: "ctr".to_string(),
+            watch_children: true,
+            all_processes: true,
+            flags: 1,
+            seeded_pids: vec![40, 10, 10],
+            current_pid: Some(10),
+        };
+        let systemd_runtime = SystemdRuntime {
+            runtime: Arc::new(NoopSystemdRuntimePort),
+            unit_name: "svc".to_string(),
+            watch_children: true,
+            all_processes: true,
+            seeded_pids: vec![21, 20],
+            flags: 2,
+            current_pid: Some(20),
+            current_running: true,
+        };
+
+        let labels = collect_startup_watch_pid_labels(
+            &StdHashMap::from([(7, 0x1)]),
+            &[container],
+            &[systemd_runtime],
+        );
+
         assert_eq!(
-            desc,
-            vec!["systemd-units=[svc] seed=all-procs pids=[2, 3]".to_string()]
+            labels,
+            vec![
+                "pid=7".to_string(),
+                "container:ctr:main=10".to_string(),
+                "container:ctr:pid=40".to_string(),
+                "systemd:svc:main=20".to_string(),
+                "systemd:svc:pid=21".to_string(),
+            ]
         );
     }
 }

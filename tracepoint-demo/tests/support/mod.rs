@@ -386,6 +386,7 @@ pub fn container_runtime(
         watch_children,
         all_processes,
         flags,
+        seeded_pids: current_pid.into_iter().collect(),
         current_pid,
     }
 }

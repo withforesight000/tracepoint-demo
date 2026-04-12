@@ -53,6 +53,7 @@ pub async fn run() -> anyhow::Result<()> {
         &mut prepared.ebpf,
         &mut prepared.state,
         &mut update_rx,
+        &prepared.startup_watch_pid_labels,
         &prepared.tty_inputs,
         prepared.watch_children,
         &prepared.target_descriptions,

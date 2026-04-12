@@ -14,6 +14,7 @@ pub struct ContainerRuntime {
     pub watch_children: bool,
     pub all_processes: bool,
     pub flags: u32,
+    pub seeded_pids: Vec<u32>,
     pub current_pid: Option<u32>,
 }
 
@@ -30,39 +31,38 @@ pub(crate) async fn seed_container_processes<TReporter: StatusReporter + ?Sized>
     reporter: &mut TReporter,
     cgroup_port: &dyn CgroupPort,
     spec: ContainerSeedSpec<'_>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<u32>> {
     if spec.all_processes {
         match cgroup_port
             .read_cgroup_v2_path(spec.main_pid)
             .and_then(|path| cgroup_port.read_cgroup_procs(&path))
         {
-            Ok(pids) => process_seed.seed_direct(&pids, spec.flags)?,
+            Ok(pids) => {
+                process_seed.seed_direct(&pids, spec.flags)?;
+                return Ok(pids);
+            }
             Err(err) => {
                 reporter.warn(format!(
                     "Failed to read cgroup.procs for container {} (pid {}): {}. Falling back to task iterator seed.",
                     spec.name_or_id, spec.main_pid, err
                 ));
                 let empty_tty_filters = HashSet::new();
-                let _ = process_seed.seed_from_task_iter(
+                return process_seed.seed_from_task_iter(
                     &[spec.main_pid],
                     &empty_tty_filters,
                     spec.flags,
-                )?;
+                );
             }
         }
-
-        return Ok(());
     }
 
     if spec.watch_children {
         let empty_tty_filters = HashSet::new();
-        let _ =
-            process_seed.seed_from_task_iter(&[spec.main_pid], &empty_tty_filters, spec.flags)?;
+        return process_seed.seed_from_task_iter(&[spec.main_pid], &empty_tty_filters, spec.flags);
     } else {
         process_seed.seed_direct(&[spec.main_pid], spec.flags)?;
+        return Ok(vec![spec.main_pid]);
     }
-
-    Ok(())
 }
 
 pub async fn apply_container_runtime_update<TReporter: StatusReporter + ?Sized>(
@@ -99,7 +99,7 @@ pub async fn apply_container_runtime_update<TReporter: StatusReporter + ?Sized>(
             );
             process_seed.seed_direct(extra_pids, runtime.flags)?;
         }
-        seed_container_processes(
+        let mut seeded_pids = seed_container_processes(
             process_seed,
             reporter,
             runtime.cgroup_port.as_ref(),
@@ -112,6 +112,12 @@ pub async fn apply_container_runtime_update<TReporter: StatusReporter + ?Sized>(
             },
         )
         .await?;
+        seeded_pids.extend_from_slice(extra_pids);
+        seeded_pids.sort_unstable();
+        seeded_pids.dedup();
+        runtime.seeded_pids = seeded_pids;
+    } else {
+        runtime.seeded_pids.clear();
     }
 
     runtime.current_pid = next_pid;
@@ -167,6 +173,7 @@ mod tests {
             watch_children: true,
             all_processes: false,
             flags: 0,
+            seeded_pids: Vec::new(),
             current_pid: None,
         };
 
@@ -269,6 +276,7 @@ mod tests {
             watch_children: false,
             all_processes: false,
             flags: 0x2,
+            seeded_pids: vec![42],
             current_pid: Some(42),
         };
         let mut reporter = MockStatusReporter::new();
@@ -306,6 +314,7 @@ mod tests {
             watch_children: false,
             all_processes: true,
             flags: 0x2,
+            seeded_pids: Vec::new(),
             current_pid: Some(42),
         };
         let mut reporter = MockStatusReporter::new();
@@ -328,6 +337,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(runtime.current_pid, Some(42));
+        assert_eq!(runtime.seeded_pids, vec![42, 99]);
     }
 
     #[tokio::test]
@@ -370,6 +380,7 @@ mod tests {
             watch_children: false,
             all_processes: false,
             flags: 0x2,
+            seeded_pids: Vec::new(),
             current_pid: None,
         };
         let mut reporter = MockStatusReporter::new();
@@ -392,5 +403,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(runtime.current_pid, Some(77));
+        assert_eq!(runtime.seeded_pids, vec![77]);
     }
 }

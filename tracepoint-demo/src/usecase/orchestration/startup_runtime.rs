@@ -92,7 +92,7 @@ pub async fn initialize_container_runtimes<TReporter: StatusReporter + ?Sized>(
             };
 
         let current_pid = runtime.query_main_pid(container_name).await?;
-        if let Some(main_pid) = current_pid {
+        let seeded_pids = if let Some(main_pid) = current_pid {
             seed_container_processes(
                 process_seed,
                 reporter,
@@ -105,8 +105,10 @@ pub async fn initialize_container_runtimes<TReporter: StatusReporter + ?Sized>(
                     all_processes: all_container_processes,
                 },
             )
-            .await?;
-        }
+            .await?
+        } else {
+            Vec::new()
+        };
 
         container_runtimes.push(ContainerRuntime {
             cgroup_port: cgroup_port.clone(),
@@ -115,6 +117,7 @@ pub async fn initialize_container_runtimes<TReporter: StatusReporter + ?Sized>(
             watch_children: container_watch_children,
             all_processes: all_container_processes,
             flags: container_flags,
+            seeded_pids,
             current_pid,
         });
     }

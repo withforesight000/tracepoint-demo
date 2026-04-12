@@ -167,6 +167,7 @@ mod tests {
                 watch_children: true,
                 all_processes: false,
                 flags: 0x2,
+                seeded_pids: Vec::new(),
                 current_pid: Some(10),
             },
             ContainerRuntime {
@@ -176,6 +177,7 @@ mod tests {
                 watch_children: false,
                 all_processes: false,
                 flags: 0x4,
+                seeded_pids: Vec::new(),
                 current_pid: Some(30),
             },
         ];

@@ -330,7 +330,7 @@ async fn prepare_runtime_plan_initializes_runtime_targets_and_descriptions() {
         plan.target_descriptions,
         vec![
             "containers=[web] seed=all-procs".to_string(),
-            "systemd-units=[demo.service] seed=all-procs pids=[31, 32]".to_string(),
+            "systemd-units=[demo.service] seed=all-procs".to_string(),
         ]
     );
     assert_eq!(
