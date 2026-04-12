@@ -431,6 +431,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn seed_container_processes_returns_empty_when_all_processes_are_missing() {
+        let mut process_seed = MockProcessSeedPort::new();
+        let mut cgroup_port = MockCgroupPort::new();
+        let mut reporter = MockStatusReporter::new();
+
+        cgroup_port
+            .expect_read_cgroup_v2_path()
+            .times(1)
+            .withf(|pid| *pid == 42)
+            .return_once(|_| Ok("/demo".to_string()));
+        cgroup_port
+            .expect_read_cgroup_procs()
+            .times(1)
+            .withf(|path| path == "/demo")
+            .return_once(|_| Ok(Vec::new()));
+        process_seed
+            .expect_seed_direct()
+            .times(1)
+            .withf(|pids, flags| pids.is_empty() && *flags == 0x2)
+            .return_once(|_, _| Ok(()));
+
+        let seeded = seed_container_processes(
+            &mut process_seed,
+            &mut reporter,
+            &cgroup_port,
+            ContainerSeedSpec {
+                name_or_id: "web",
+                main_pid: 42,
+                flags: 0x2,
+                watch_children: false,
+                all_processes: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(seeded.is_empty());
+    }
+
+    #[tokio::test]
     async fn apply_container_runtime_update_updates_current_pid_after_successful_seed() {
         let mut process_seed = MockProcessSeedPort::new();
         let mut runtime = ContainerRuntime {

@@ -393,6 +393,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn seed_systemd_unit_processes_returns_empty_when_all_processes_are_missing() {
+        let mut process_seed = MockProcessSeedPort::new();
+        let runtime = QueuedSystemdRuntimePort::with_unit_pids_result(Ok(Vec::new()));
+        let mut reporter = MockStatusReporter::new();
+        process_seed
+            .expect_seed_direct()
+            .times(1)
+            .withf(|pids, flags| pids.is_empty() && *flags == 0x4)
+            .returning(|_, _| Ok(()));
+
+        let seeded_pids = seed_systemd_unit_processes(
+            &mut process_seed,
+            &mut reporter,
+            &runtime,
+            SystemdSeedSpec {
+                unit_name: "demo.service",
+                main_pid: Some(55),
+                flags: 0x4,
+                watch_children: true,
+                all_processes: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(seeded_pids.is_empty());
+    }
+
+    #[tokio::test]
     async fn seed_systemd_unit_processes_falls_back_to_task_iter_when_unit_pids_fail() {
         let mut process_seed = MockProcessSeedPort::new();
         process_seed
@@ -569,6 +598,53 @@ mod tests {
         assert!(runtime.current_running);
         assert_eq!(runtime.current_active_state.as_deref(), Some("reloading"));
         assert_eq!(runtime.current_sub_state.as_deref(), Some("reload"));
+    }
+
+    #[tokio::test]
+    async fn apply_systemd_runtime_update_keeps_pid_when_state_lags_inactive_transition() {
+        let mut process_seed = MockProcessSeedPort::new();
+        process_seed
+            .expect_seed_direct()
+            .times(1)
+            .withf(|pids, flags| pids == [88] && *flags == 0x2)
+            .returning(|_, _| Ok(()));
+        let mut runtime = SystemdRuntime {
+            runtime: Arc::new(NoopSystemdRuntimePort),
+            unit_name: "demo.service".to_string(),
+            watch_children: false,
+            all_processes: false,
+            seeded_pids: vec![88],
+            flags: 0x2,
+            current_pid: Some(88),
+            current_running: true,
+            current_active_state: Some("active".to_string()),
+            current_sub_state: Some("running".to_string()),
+        };
+        let mut reporter = MockStatusReporter::new();
+        reporter
+            .expect_info()
+            .times(1)
+            .withf(|message| {
+                message
+                    == "systemd unit demo.service changed: state active/running -> inactive/dead"
+            })
+            .return_const(());
+
+        apply_systemd_runtime_update(
+            &mut process_seed,
+            &mut reporter,
+            &mut runtime,
+            Some(88),
+            false,
+            Some("inactive".to_string()),
+            Some("dead".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(runtime.current_pid, Some(88));
+        assert!(!runtime.current_running);
+        assert_eq!(runtime.seeded_pids, vec![88]);
     }
 
     #[tokio::test]

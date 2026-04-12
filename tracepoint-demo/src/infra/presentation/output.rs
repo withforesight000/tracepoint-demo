@@ -184,6 +184,24 @@ mod tests {
     }
 
     #[test]
+    fn startup_notice_message_with_targets_and_no_roots() {
+        let message = startup_notice_message(
+            &[],
+            &[],
+            true,
+            &[
+                "containers=[web]".to_string(),
+                "systemd-units=[svc]".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            message,
+            "Watching execve syscalls (watch_children=on) containers=[web] systemd-units=[svc] (Ctrl-C to exit)"
+        );
+    }
+
+    #[test]
     fn shutdown_message_is_constant() {
         assert_eq!(shutdown_message(), "Exiting...");
     }

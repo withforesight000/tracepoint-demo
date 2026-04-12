@@ -601,6 +601,167 @@ async fn prepare_runtime_plan_seeds_all_systemd_processes_even_without_main_pid(
 }
 
 #[tokio::test]
+async fn prepare_runtime_plan_seeds_all_processes_for_active_exited_systemd_unit() {
+    let mut process_seed = RecordingProcessSeed::default();
+    process_seed.push_direct_result(Ok(()));
+
+    let systemd_runtime = Arc::new(ScriptedSystemdRuntimePort::default());
+    systemd_runtime.push_current_status_result(Ok(SystemdUnitRuntimeStatus {
+        exists: true,
+        active_state: Some("active".to_string()),
+        sub_state: Some("exited".to_string()),
+        main_pid: None,
+    }));
+    systemd_runtime.push_unit_pids_result(Ok(vec![31, 32]));
+
+    let mut backend = TestStartupBackend {
+        process_seed,
+        reporter: RecordingStatusReporter::default(),
+        wait_port: ScriptedWaitPort::default(),
+        cgroup_port: Arc::new(ScriptedCgroupPort::default()),
+        container_runtime: Arc::new(ScriptedContainerRuntimePort::default()),
+        systemd_runtime,
+    };
+
+    let pids: [u32; 0] = [];
+    let tty_filters = std::collections::HashSet::new();
+    let tty_inputs: Vec<String> = Vec::new();
+    let containers: Vec<String> = Vec::new();
+    let systemd_units = vec!["demo.service".to_string()];
+
+    let plan = prepare_runtime_plan(
+        &mut backend,
+        StartupPrepareInputs {
+            pids: &pids,
+            tty_inputs: &tty_inputs,
+            tty_filters: &tty_filters,
+            containers: &containers,
+            systemd_units: &systemd_units,
+            watch_children: false,
+            all_container_processes: false,
+            all_systemd_processes: true,
+            watch_flags: watch_flags(false),
+            container_runtime_available: false,
+            systemd_runtime_available: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(plan.systemd_runtimes.len(), 1);
+    assert_eq!(plan.systemd_runtimes[0].current_pid, None);
+    assert!(plan.systemd_runtimes[0].current_running);
+    assert!(plan.systemd_runtimes[0].watch_children);
+    assert_eq!(plan.systemd_runtimes[0].seeded_pids, vec![31, 32]);
+    assert!(plan.current_watch_roots.is_empty());
+    assert_eq!(
+        plan.target_descriptions,
+        vec!["systemd-units=[demo.service] seed=all-procs".to_string()]
+    );
+    assert_eq!(
+        backend.process_seed.direct_calls,
+        vec![support::SeedDirectCall {
+            pids: vec![31, 32],
+            flags: watch_flags(true),
+        }]
+    );
+    assert!(backend.process_seed.task_iter_calls.is_empty());
+    assert_eq!(
+        backend
+            .systemd_runtime
+            .current_status_calls
+            .lock()
+            .unwrap()
+            .as_slice(),
+        &["demo.service".to_string()]
+    );
+    assert_eq!(
+        backend
+            .systemd_runtime
+            .unit_pids_calls
+            .lock()
+            .unwrap()
+            .as_slice(),
+        &["demo.service".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn prepare_runtime_plan_errors_when_all_systemd_processes_cannot_fallback_without_main_pid() {
+    let process_seed = RecordingProcessSeed::default();
+
+    let systemd_runtime = Arc::new(ScriptedSystemdRuntimePort::default());
+    systemd_runtime.push_current_status_result(Ok(SystemdUnitRuntimeStatus {
+        exists: true,
+        active_state: Some("active".to_string()),
+        sub_state: Some("running".to_string()),
+        main_pid: None,
+    }));
+    systemd_runtime.push_unit_pids_result(Err(anyhow::anyhow!("unit pids unavailable")));
+
+    let mut backend = TestStartupBackend {
+        process_seed,
+        reporter: RecordingStatusReporter::default(),
+        wait_port: ScriptedWaitPort::default(),
+        cgroup_port: Arc::new(ScriptedCgroupPort::default()),
+        container_runtime: Arc::new(ScriptedContainerRuntimePort::default()),
+        systemd_runtime,
+    };
+
+    let pids: [u32; 0] = [];
+    let tty_filters = std::collections::HashSet::new();
+    let tty_inputs: Vec<String> = Vec::new();
+    let containers: Vec<String> = Vec::new();
+    let systemd_units = vec!["demo.service".to_string()];
+
+    let result = prepare_runtime_plan(
+        &mut backend,
+        StartupPrepareInputs {
+            pids: &pids,
+            tty_inputs: &tty_inputs,
+            tty_filters: &tty_filters,
+            containers: &containers,
+            systemd_units: &systemd_units,
+            watch_children: false,
+            all_container_processes: false,
+            all_systemd_processes: true,
+            watch_flags: watch_flags(false),
+            container_runtime_available: false,
+            systemd_runtime_available: true,
+        },
+    )
+    .await;
+
+    assert!(result.is_err());
+    let err = result.err().unwrap();
+
+    assert!(
+        err.to_string()
+            .contains("No MainPID is available for fallback")
+    );
+    assert!(backend.process_seed.task_iter_calls.is_empty());
+    assert!(backend.process_seed.direct_calls.is_empty());
+    assert_eq!(
+        backend
+            .systemd_runtime
+            .current_status_calls
+            .lock()
+            .unwrap()
+            .as_slice(),
+        &["demo.service".to_string()]
+    );
+    assert_eq!(
+        backend
+            .systemd_runtime
+            .unit_pids_calls
+            .lock()
+            .unwrap()
+            .as_slice(),
+        &["demo.service".to_string()]
+    );
+}
+
+#[tokio::test]
 async fn handle_runtime_update_reseeds_container_pid_changes_and_refreshes_watch_roots() {
     let cgroup_port = Arc::new(ScriptedCgroupPort::default());
     let container_runtime_port = Arc::new(ScriptedContainerRuntimePort::default());
@@ -675,6 +836,141 @@ async fn handle_runtime_update_reseeds_container_pid_changes_and_refreshes_watch
         vec![WatchOp::Remove(20), WatchOp::Upsert(21, watch_flags(true))]
     );
     assert!(backend.reporter.warns.is_empty());
+}
+
+#[tokio::test]
+async fn handle_runtime_update_forces_refresh_for_container_exec_without_following_children() {
+    let cgroup_port = Arc::new(ScriptedCgroupPort::default());
+    let container_runtime_port = Arc::new(ScriptedContainerRuntimePort::default());
+
+    let container_runtime = container_runtime(
+        "web",
+        false,
+        false,
+        watch_flags(false),
+        Some(42),
+        cgroup_port.clone(),
+        container_runtime_port.clone(),
+    );
+
+    let mut backend = RuntimeUpdateHarness {
+        process_seed: {
+            let mut process_seed = RecordingProcessSeed::default();
+            process_seed.push_direct_result(Ok(()));
+            process_seed.push_direct_result(Ok(()));
+            process_seed
+        },
+        reporter: RecordingStatusReporter::default(),
+        watch_store: RecordingWatchPidStore::from_roots([
+            (10, watch_flags(false)),
+            (42, watch_flags(false)),
+        ]),
+        static_watch_roots: HashMap::from([(10, watch_flags(false))]),
+        current_watch_roots: HashMap::from([
+            (10, watch_flags(false)),
+            (42, watch_flags(false)),
+        ]),
+        container_runtimes: vec![container_runtime],
+        systemd_runtimes: vec![],
+    };
+
+    let keep_running = handle_runtime_update(
+        &mut backend,
+        Some(RuntimeUpdate::ContainerPid {
+            index: 0,
+            pid: Some(42),
+            force_refresh: true,
+            extra_pids: vec![99],
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(keep_running);
+    assert_eq!(backend.container_runtimes[0].current_pid, Some(42));
+    assert_eq!(backend.container_runtimes[0].seeded_pids, vec![42, 99]);
+    assert_eq!(
+        backend.process_seed.direct_calls,
+        vec![
+            support::SeedDirectCall {
+                pids: vec![99],
+                flags: watch_flags(false),
+            },
+            support::SeedDirectCall {
+                pids: vec![42],
+                flags: watch_flags(false),
+            },
+        ]
+    );
+    assert!(backend.process_seed.task_iter_calls.is_empty());
+    assert_eq!(
+        backend.current_watch_roots,
+        HashMap::from([(10, watch_flags(false)), (42, watch_flags(false))])
+    );
+    assert_eq!(
+        backend.watch_store.current,
+        HashMap::from([(10, watch_flags(false)), (42, watch_flags(false))])
+    );
+    assert!(backend.watch_store.ops.is_empty());
+}
+
+#[tokio::test]
+async fn handle_runtime_update_clears_container_roots_when_pid_disappears() {
+    let cgroup_port = Arc::new(ScriptedCgroupPort::default());
+    let container_runtime_port = Arc::new(ScriptedContainerRuntimePort::default());
+
+    let container_runtime = container_runtime(
+        "web",
+        false,
+        false,
+        watch_flags(false),
+        Some(42),
+        cgroup_port.clone(),
+        container_runtime_port.clone(),
+    );
+
+    let mut backend = RuntimeUpdateHarness {
+        process_seed: RecordingProcessSeed::default(),
+        reporter: RecordingStatusReporter::default(),
+        watch_store: RecordingWatchPidStore::from_roots([
+            (10, watch_flags(false)),
+            (42, watch_flags(false)),
+        ]),
+        static_watch_roots: HashMap::from([(10, watch_flags(false))]),
+        current_watch_roots: HashMap::from([
+            (10, watch_flags(false)),
+            (42, watch_flags(false)),
+        ]),
+        container_runtimes: vec![container_runtime],
+        systemd_runtimes: vec![],
+    };
+
+    let keep_running = handle_runtime_update(
+        &mut backend,
+        Some(RuntimeUpdate::ContainerPid {
+            index: 0,
+            pid: None,
+            force_refresh: false,
+            extra_pids: Vec::new(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(keep_running);
+    assert_eq!(backend.container_runtimes[0].current_pid, None);
+    assert!(backend.container_runtimes[0].seeded_pids.is_empty());
+    assert_eq!(
+        backend.current_watch_roots,
+        HashMap::from([(10, watch_flags(false))])
+    );
+    assert_eq!(
+        backend.watch_store.current,
+        HashMap::from([(10, watch_flags(false))])
+    );
+    assert_eq!(backend.watch_store.ops, vec![WatchOp::Remove(42)]);
+    assert!(backend.process_seed.task_iter_calls.is_empty());
+    assert!(backend.process_seed.direct_calls.is_empty());
 }
 
 #[tokio::test]
@@ -823,6 +1119,67 @@ async fn handle_runtime_update_clears_and_reseeds_systemd_roots() {
         backend.watch_store.ops,
         vec![WatchOp::Remove(30), WatchOp::Upsert(40, watch_flags(true))]
     );
+}
+
+#[tokio::test]
+async fn handle_runtime_update_clears_systemd_roots_when_active_exited_loses_main_pid() {
+    let systemd_runtime_port = Arc::new(ScriptedSystemdRuntimePort::default());
+
+    let systemd_runtime = systemd_runtime(
+        "demo.service",
+        false,
+        false,
+        watch_flags(false),
+        Some(88),
+        true,
+        vec![88],
+        systemd_runtime_port.clone(),
+    );
+
+    let mut backend = RuntimeUpdateHarness {
+        process_seed: RecordingProcessSeed::default(),
+        reporter: RecordingStatusReporter::default(),
+        watch_store: RecordingWatchPidStore::from_roots([
+            (10, watch_flags(false)),
+            (88, watch_flags(false)),
+        ]),
+        static_watch_roots: HashMap::from([(10, watch_flags(false))]),
+        current_watch_roots: HashMap::from([
+            (10, watch_flags(false)),
+            (88, watch_flags(false)),
+        ]),
+        container_runtimes: vec![],
+        systemd_runtimes: vec![systemd_runtime],
+    };
+
+    let keep_running = handle_runtime_update(
+        &mut backend,
+        Some(RuntimeUpdate::SystemdStatus {
+            index: 0,
+            pid: None,
+            running: true,
+            active_state: Some("active".to_string()),
+            sub_state: Some("exited".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(keep_running);
+    assert_eq!(backend.systemd_runtimes[0].current_pid, None);
+    assert!(backend.systemd_runtimes[0].current_running);
+    assert!(backend.systemd_runtimes[0].seeded_pids.is_empty());
+    assert_eq!(
+        backend.current_watch_roots,
+        HashMap::from([(10, watch_flags(false))])
+    );
+    assert_eq!(
+        backend.watch_store.current,
+        HashMap::from([(10, watch_flags(false))])
+    );
+    assert_eq!(backend.watch_store.ops, vec![WatchOp::Remove(88)]);
+    assert!(backend.process_seed.task_iter_calls.is_empty());
+    assert!(backend.process_seed.direct_calls.is_empty());
 }
 
 #[tokio::test]
