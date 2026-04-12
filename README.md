@@ -33,6 +33,9 @@ sudo cargo run --release -- --container my-service
 sudo cargo run --release -- --systemd-unit sshd.service
 ```
 
+PID targets must be passed with repeated `-p/--pid` arguments; bare positional PIDs are not
+supported.
+
 See `doc/operations.md` for target-selection rules, startup behavior, output format, logging, and
 more examples.
 

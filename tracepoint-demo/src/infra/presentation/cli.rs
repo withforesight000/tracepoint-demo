@@ -9,21 +9,16 @@ use crate::usecase::policy::trace_selected_targets::TraceRequest;
     ArgGroup::new("target")
         .required(true)
         .multiple(true)
-        .args(["pid", "positional_pids", "tty", "container", "systemd_unit"])
+        .args(["pid", "tty", "container", "systemd_unit"])
 ))]
 pub struct CliArgs {
-    /// Repeated `--pid` arguments keep the option-style interface used in earlier versions.
-    /// They can be combined with positional PIDs, `--tty`, and runtime targets.
+    /// Use `-p/--pid` for PID targets.
+    /// Repeat it to add more PIDs, and combine it with `--tty` and runtime targets.
     #[arg(short = 'p', long = "pid", value_name = "PID")]
     pub pid: Vec<u32>,
 
-    /// Positional PIDs can be used instead of `--pid`.
-    /// They can also be combined with `--tty` and runtime targets.
-    #[arg(value_name = "PID")]
-    pub positional_pids: Vec<u32>,
-
     /// Monitor processes that share the specified controlling terminal.
-    /// Can be combined with PID inputs, container, or systemd targets.
+    /// Can be combined with `-p/--pid`, container, or systemd targets.
     #[arg(short = 't', long = "tty", value_name = "TTY")]
     pub tty: Vec<String>,
 
@@ -51,11 +46,8 @@ pub struct CliArgs {
 
 impl CliArgs {
     pub fn into_request(self) -> TraceRequest {
-        let mut pids = self.pid;
-        pids.extend(self.positional_pids);
-
         TraceRequest {
-            pids,
+            pids: self.pid,
             tty_inputs: self.tty,
             containers: self.container,
             all_container_processes: self.all_container_processes,
@@ -73,8 +65,7 @@ mod tests {
     #[test]
     fn into_request_merges_pid_inputs_and_flips_watch_children_flag() {
         let request = CliArgs {
-            pid: vec![10],
-            positional_pids: vec![20],
+            pid: vec![10, 20],
             tty: vec!["/dev/pts/3".to_string()],
             container: vec!["web".to_string()],
             all_container_processes: true,

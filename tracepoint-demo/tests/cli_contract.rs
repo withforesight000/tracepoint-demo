@@ -11,16 +11,8 @@ fn parse_error(args: &[&str]) -> clap::Error {
 
 #[test]
 fn parses_repeatable_pid_arguments_into_expected_trace_request() {
-    let args = CliArgs::try_parse_from([
-        "tracepoint-demo",
-        "--pid",
-        "10",
-        "--pid",
-        "20",
-        "--pid",
-        "30",
-    ])
-    .unwrap();
+    let args =
+        CliArgs::try_parse_from(["tracepoint-demo", "-p", "10", "-p", "20", "-p", "30"]).unwrap();
 
     let request = args.into_request();
 
@@ -32,16 +24,10 @@ fn parses_repeatable_pid_arguments_into_expected_trace_request() {
 }
 
 #[test]
-fn parses_positional_pid_arguments_into_expected_trace_request() {
-    let args = CliArgs::try_parse_from(["tracepoint-demo", "11", "12", "13"]).unwrap();
+fn rejects_positional_pid_arguments() {
+    let err = parse_error(&["tracepoint-demo", "11", "12", "13"]);
 
-    let request = args.into_request();
-
-    assert_eq!(request.pids, vec![11, 12, 13]);
-    assert!(request.tty_inputs.is_empty());
-    assert!(request.containers.is_empty());
-    assert!(request.systemd_units.is_empty());
-    assert!(request.watch_children);
+    assert_eq!(err.kind().clone(), ErrorKind::UnknownArgument, "{err}");
 }
 
 #[test]
@@ -104,6 +90,7 @@ fn parses_mixed_pid_tty_container_and_systemd_arguments_into_expected_trace_requ
         "/dev/pts/3",
         "--pid",
         "10",
+        "--pid",
         "20",
         "--container",
         "web",

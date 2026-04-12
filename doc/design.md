@@ -18,6 +18,8 @@ Before diving into the layers, keep this mental model in mind:
 
 - the CLI gathers additive target-selection inputs such as PID, TTY, container, or systemd unit,
   and startup merges the resulting seeds into one watch set
+- PID targets are selected with repeated `-p/--pid` arguments; bare positional PIDs are not part
+  of the CLI contract
 - bootstrap code prepares concrete dependencies and starts the runtime
 - usecases decide what should be watched and how updates should be applied
 - gateways talk to eBPF, procfs, Docker, and systemd
@@ -191,7 +193,7 @@ Some terms appear repeatedly in the code and are easy to confuse on a first read
 - runtime update: a userspace message saying that container or systemd state changed
 - runtime updates also drive user-visible transition notices so restarts, recreation, and new
   replacement PIDs are visible without enabling debug logging
-- startup PID banners group roots by source so explicit PID inputs appear as `pid:(pid=...)`,
+- startup PID banners group roots by source so explicit `-p/--pid` inputs appear as `pid:(pid=...)`,
   TTY roots appear as `tty:/dev/pts/3:(pid=...)`, and runtime-derived targets stay grouped per
   target with `main=...` plus any extra seeded PIDs shown as `pid=...`
 

@@ -12,8 +12,8 @@ separate `bpfel-unknown-none` rustup target is not required.
 
 ## Target selection
 
-- PID inputs and TTY filters are additive. You can combine `--pid`, positional PIDs, and `--tty`
-  in the same invocation, and you can also mix them with container or systemd targets.
+- PID inputs and TTY filters are additive. You can combine repeated `-p/--pid` arguments and
+  `--tty` in the same invocation, and you can also mix them with container or systemd targets.
 - Container and systemd targets can be combined in the same invocation.
 - `--no-watch-children` limits tracing to the selected roots.
 - `--all-container-processes` and `--all-systemd-processes` override `--no-watch-children` for
@@ -30,8 +30,8 @@ separate `bpfel-unknown-none` rustup target is not required.
 - `--all-systemd-processes` and `--all-container-processes` seed the runtime target's current PID
   list at startup, and the startup banner folds those resolved PIDs into the main grouped
   `PIDs:` list.
-- Startup banner segments are grouped by source. Explicit `--pid` and positional PID inputs appear
-  as `pid:(pid=1111, 2222)`, TTY roots appear as `tty:/dev/pts/3:(pid=3333, 3334)`, and runtime
+- Startup banner segments are grouped by source. Explicit `-p/--pid` inputs appear as
+  `pid:(pid=1111, 2222)`, TTY roots appear as `tty:/dev/pts/3:(pid=3333, 3334)`, and runtime
   targets keep their source labels such as `container:my-service:(main=1234)` or
   `systemd:sshd.service:(main=5678, pid=6789)`.
 - `--all-container-processes` and `--all-systemd-processes` appear in the banner suffix as
@@ -68,7 +68,7 @@ Set `RUST_LOG=tracepoint_demo=debug` to show the binary's debug logs.
 
 ```bash
 sudo cargo run --release -- --pid 1234 --pid 9012
-sudo cargo run --release -- 1234 9012 --no-watch-children
+sudo cargo run --release -- -p 1234 -p 9012 --no-watch-children
 sudo cargo run --release -- --tty /dev/pts/9 --systemd-unit sshd.service
 sudo cargo run --release -- --container my-service --systemd-unit sshd.service
 sudo cargo run --release -- --systemd-unit sshd.service --systemd-unit user@1000.service --all-systemd-processes
