@@ -67,6 +67,7 @@ jobs:
       - name: Dispatch release workflow for semver tags
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
           if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -74,9 +75,9 @@ jobs:
             exit 0
           fi
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release $TAG already exists; skipping dispatch."
             exit 0
           fi
 
-          gh workflow run release.yml --ref "$TAG" -f tag="$TAG"
+          gh workflow run release.yml --repo "$REPO" --ref "$TAG" -f tag="$TAG"
