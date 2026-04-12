@@ -85,6 +85,19 @@ cargo tarpaulin --skip-clean --lib \
   --exclude-files tracepoint-demo-ebpf/src/vmlinux.rs --out Stdout
 ```
 
+To catch eBPF verifier regressions, run the optional smoke test on a kernel that can load the
+programs:
+
+```bash
+TRACEPOINT_DEMO_EBPF_SMOKE_TEST=1 sudo cargo test -p tracepoint-demo --test ebpf_verifier_smoke
+```
+
+This exercises the real `program.load()` path, so any verifier rejection will surface there rather
+than only at daemon startup.
+
+GitHub Actions also runs the same smoke test before it dispatches tag-driven releases, so a
+verifier regression blocks the release workflow as well.
+
 ## Regenerating BTF bindings
 
 `tracepoint-demo-ebpf/src/vmlinux.rs` contains the Aya-generated BTF definitions that the BPF

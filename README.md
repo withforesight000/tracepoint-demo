@@ -58,6 +58,18 @@ cargo test -p tracepoint-demo
 cargo test -p tracepoint-demo-ebpf --lib
 ```
 
+To exercise the kernel verifier on a live machine, run the optional smoke test as root:
+
+```bash
+TRACEPOINT_DEMO_EBPF_SMOKE_TEST=1 sudo cargo test -p tracepoint-demo --test ebpf_verifier_smoke
+```
+
+That test loads the embedded eBPF object against the current kernel, so it will fail with the
+verifier log if the program stops loading on that host.
+
+The GitHub Actions CI workflow also runs that smoke test before it dispatches tagged releases, so
+verifier regressions block both normal CI and release publication.
+
 ## License
 
 - Userspace code: MIT or Apache-2.0, at your option.

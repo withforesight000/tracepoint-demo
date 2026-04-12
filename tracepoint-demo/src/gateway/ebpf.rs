@@ -104,36 +104,59 @@ fn bump_memlock_rlimit() {
 }
 
 pub fn attach_tracepoint_programs(ebpf: &mut Ebpf) -> anyhow::Result<()> {
+    load_tracepoint_programs(ebpf)?;
+
+    {
+        let program: &mut TracePoint = ebpf
+            .program_mut("tracepoint_demo")
+            .ok_or_else(|| anyhow::anyhow!("program not found"))?
+            .try_into()?;
+        program.attach("syscalls", "sys_enter_execve")?;
+    }
+
+    {
+        let fork: &mut TracePoint = ebpf.program_mut("on_fork").unwrap().try_into()?;
+        fork.attach("sched", "sched_process_fork")?;
+    }
+
+    {
+        let exit: &mut TracePoint = ebpf.program_mut("on_exit").unwrap().try_into()?;
+        exit.attach("sched", "sched_process_exit")?;
+    }
+
+    Ok(())
+}
+
+/// Load the tracepoint, fork, exit, and iter programs without attaching them.
+/// Useful for verifier smoke tests that should fail before any live attachment.
+pub fn load_tracepoint_programs(ebpf: &mut Ebpf) -> anyhow::Result<()> {
     {
         let program: &mut TracePoint = ebpf
             .program_mut("tracepoint_demo")
             .ok_or_else(|| anyhow::anyhow!("program not found"))?
             .try_into()?;
         program.load()?;
-        program.attach("syscalls", "sys_enter_execve")?;
     }
 
     {
         let fork: &mut TracePoint = ebpf.program_mut("on_fork").unwrap().try_into()?;
         fork.load()?;
-        fork.attach("sched", "sched_process_fork")?;
     }
 
     {
         let exit: &mut TracePoint = ebpf.program_mut("on_exit").unwrap().try_into()?;
         exit.load()?;
-        exit.attach("sched", "sched_process_exit")?;
     }
 
     ensure_task_iter_program_loaded(ebpf)?;
     Ok(())
 }
 
-pub fn load_tracepoint_demo_ebpf() -> anyhow::Result<Ebpf> {
+pub fn load_embedded_tracepoint_demo_ebpf() -> anyhow::Result<Ebpf> {
     bump_memlock_rlimit();
 
     // Runtime path:
-    // - `load_tracepoint_demo_ebpf()` runs when the daemon starts.
+    // - `load_embedded_tracepoint_demo_ebpf()` runs when the daemon starts.
     // - It does not read the eBPF object from disk itself.
     //
     // Compile-time path:
@@ -146,10 +169,15 @@ pub fn load_tracepoint_demo_ebpf() -> anyhow::Result<Ebpf> {
     //
     // By the time this function runs, the only remaining work is to hand that embedded byte slice
     // to `Ebpf::load(...)`.
-    let mut ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
+    let ebpf = Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/tracepoint-demo"
     )))?;
+    Ok(ebpf)
+}
+
+pub fn load_tracepoint_demo_ebpf() -> anyhow::Result<Ebpf> {
+    let mut ebpf = load_embedded_tracepoint_demo_ebpf()?;
     attach_tracepoint_programs(&mut ebpf)?;
     Ok(ebpf)
 }
