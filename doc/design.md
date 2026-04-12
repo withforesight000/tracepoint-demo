@@ -163,6 +163,8 @@ The current tree already follows the target layering:
 - `gateway/*.rs` owns concrete eBPF, procfs, Docker, and systemd I/O
 - the eBPF code prefers older task helpers when they are sufficient, which keeps the tracepoint
   program loadable on older supported kernels instead of depending on newer BTF-only helpers
+- exec-event capture reads argv pointers from a bounded NULL-terminated array snapshot so userspace
+  only prints the argv entries that were actually present at syscall entry
 
 ## Suggested reading order
 

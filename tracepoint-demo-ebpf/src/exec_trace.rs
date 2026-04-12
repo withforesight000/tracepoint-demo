@@ -1,11 +1,11 @@
 use aya_ebpf::{
     helpers::{
         bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_uid_gid, bpf_ktime_get_ns,
-        bpf_probe_read_user, bpf_probe_read_user_str_bytes,
+        bpf_probe_read_user_buf, bpf_probe_read_user_str_bytes,
     },
     programs::TracePointContext,
 };
-use core::ptr;
+use core::{mem, ptr};
 
 use tracepoint_demo_common::ExecEvent;
 use tracepoint_demo_ebpf::{split_pid_tgid, split_uid_gid};
@@ -39,12 +39,8 @@ pub(crate) unsafe fn handle_exec_trace(ctx: TracePointContext) -> Result<u32, i6
                 (*event).comm = comm;
             }
             read_filename(&raw, &mut (*event).filename);
-            let argv_ptr = raw.args[1] as *const *const u8;
-            read_arg(argv_ptr, 0, &mut (*event).argv[0]);
-            read_arg(argv_ptr, 1, &mut (*event).argv[1]);
-            read_arg(argv_ptr, 2, &mut (*event).argv[2]);
-            read_arg(argv_ptr, 3, &mut (*event).argv[3]);
-            read_arg(argv_ptr, 4, &mut (*event).argv[4]);
+            let argv_ptr = raw.args[1] as *const u8;
+            read_argv(argv_ptr, &mut (*event).argv);
         }
         entry.submit(0);
     }
@@ -61,18 +57,28 @@ unsafe fn read_filename(raw: &trace_event_raw_sys_enter, filename: &mut [u8; 128
     let _ = unsafe { bpf_probe_read_user_str_bytes(filename_addr, filename) };
 }
 
-unsafe fn read_arg(argv_ptr: *const *const u8, arg_index: usize, dst: &mut [u8; 64]) {
+unsafe fn read_argv(argv_ptr: *const u8, argv: &mut [[u8; 64]; 5]) {
     if argv_ptr.is_null() {
         return;
     }
 
-    let arg_slot = unsafe { argv_ptr.add(arg_index) };
-    let Ok(arg_ptr) = (unsafe { bpf_probe_read_user::<*const u8>(arg_slot) }) else {
-        return;
-    };
-    if arg_ptr.is_null() {
+    // Copy the argv pointer array first, then follow the pointers we actually
+    // observed. That avoids chasing a moving user pointer repeatedly and lets
+    // us stop cleanly at the first NULL terminator.
+    let mut raw_argv = [0u8; mem::size_of::<usize>() * 5];
+    if unsafe { bpf_probe_read_user_buf(argv_ptr, &mut raw_argv) }.is_err() {
         return;
     }
 
-    let _ = unsafe { bpf_probe_read_user_str_bytes(arg_ptr, dst) };
+    for (slot, dst) in raw_argv
+        .chunks_exact(mem::size_of::<usize>())
+        .zip(argv.iter_mut())
+    {
+        let arg_ptr = unsafe { ptr::read_unaligned(slot.as_ptr() as *const usize) } as *const u8;
+        if arg_ptr.is_null() {
+            break;
+        }
+
+        let _ = unsafe { bpf_probe_read_user_str_bytes(arg_ptr, dst) };
+    }
 }

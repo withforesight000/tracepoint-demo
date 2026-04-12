@@ -33,7 +33,9 @@ archives for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`. The rel
 are pinned to Ubuntu 22.04 so the published binaries stay compatible with older glibc releases
 than an Ubuntu 24.04 build would require. The kernel-side code also avoids newer task helpers
 where a stable older alternative is available, which helps the daemon load on older supported
-Linux kernels.
+Linux kernels. Exec events capture up to the first five argv entries from the NULL-terminated
+argv pointer array, so the printed command line stays bounded even when later slots are missing or
+invalid.
 
 ## Run
 
