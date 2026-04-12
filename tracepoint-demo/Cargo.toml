@@ -24,7 +24,7 @@ tokio = { workspace = true, features = [
     "signal",
 ] }
 zbus = { version = "5.14", features = ["tokio"] }
-zbus_systemd = { version = "0.25901", features = ["systemd1"] }
+zbus_systemd = { version = "0.26000", features = ["systemd1"] }
 clap = { workspace = true, features = ["derive", "help", "usage"] }
 
 [dev-dependencies]
