@@ -107,9 +107,10 @@ git push origin 0.1.0
 ```
 
 The release workflow builds Linux artifacts for `x86_64-unknown-linux-gnu` and
-`aarch64-unknown-linux-gnu` on GitHub-hosted runners, then publishes them to GitHub Releases.
-If you need to rerun the release step directly, the workflow is also available as a manual
-`workflow_dispatch` with a `tag` input.
+`aarch64-unknown-linux-gnu` on GitHub-hosted Ubuntu 22.04 runners, then publishes them to GitHub
+Releases. That baseline keeps the binaries usable on machines with older glibc than an Ubuntu
+24.04 build would require. If you need to rerun the release step directly, the workflow is also
+available as a manual `workflow_dispatch` with a `tag` input.
 
 Release notes are generated from `CHANGELOG.md`. The 0.1.0 entry is intentionally labeled
 `Initial Release`, and later releases can add version-specific notes under the matching heading.

@@ -29,7 +29,9 @@ cargo build --release
 
 Tagged releases are published on GitHub Releases. Push a semver tag such as `0.1.0`; the CI
 workflow runs first, and if it succeeds it dispatches the release workflow to produce Linux
-archives for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`.
+archives for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`. The release runners
+are pinned to Ubuntu 22.04 so the published binaries stay compatible with older glibc releases
+than an Ubuntu 24.04 build would require.
 
 ## Run
 
