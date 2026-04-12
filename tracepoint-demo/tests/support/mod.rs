@@ -402,6 +402,12 @@ pub fn systemd_runtime(
     seeded_pids: Vec<u32>,
     runtime: SharedSystemdRuntimePort,
 ) -> SystemdRuntime {
+    let (current_active_state, current_sub_state) = if current_running {
+        (Some("active".to_string()), Some("running".to_string()))
+    } else {
+        (Some("inactive".to_string()), Some("dead".to_string()))
+    };
+
     SystemdRuntime {
         runtime,
         unit_name: unit_name.to_string(),
@@ -411,6 +417,8 @@ pub fn systemd_runtime(
         flags,
         current_pid,
         current_running,
+        current_active_state,
+        current_sub_state,
     }
 }
 

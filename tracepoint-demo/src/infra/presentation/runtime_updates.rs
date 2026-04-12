@@ -92,10 +92,20 @@ impl<TReporter: StatusReporter + ?Sized> RuntimeUpdateHandler
         index: usize,
         pid: Option<u32>,
         running: bool,
+        active_state: Option<String>,
+        sub_state: Option<String>,
     ) -> anyhow::Result<()> {
         let runtime = self.backend.systemd_runtime_mut(index)?;
-        apply_systemd_runtime_update(self.process_seed, self.reporter, runtime, pid, running)
-            .await?;
+        apply_systemd_runtime_update(
+            self.process_seed,
+            self.reporter,
+            runtime,
+            pid,
+            running,
+            active_state,
+            sub_state,
+        )
+        .await?;
         self.backend.refresh_watch_pids()
     }
 }
@@ -185,6 +195,8 @@ mod tests {
             flags: 0x7,
             current_pid,
             current_running,
+            current_active_state: current_running.then(|| "active".to_string()),
+            current_sub_state: current_running.then(|| "running".to_string()),
         }
     }
 
@@ -203,6 +215,13 @@ mod tests {
             refresh_error: None,
         };
         let mut reporter = MockStatusReporter::new();
+        reporter
+            .expect_info()
+            .times(1)
+            .withf(|message| {
+                message == "container web changed: state not-running -> running, pid none -> 41"
+            })
+            .return_const(());
         let mut handler = StateRuntimeUpdateHandler {
             process_seed: &mut process_seed,
             backend: &mut backend,
@@ -241,6 +260,14 @@ mod tests {
             refresh_error: None,
         };
         let mut reporter = MockStatusReporter::new();
+        reporter
+            .expect_info()
+            .times(1)
+            .withf(|message| {
+                message
+                    == "systemd unit svc.service changed: state missing -> active/running, MainPID none -> 77"
+            })
+            .return_const(());
         let mut handler = StateRuntimeUpdateHandler {
             process_seed: &mut process_seed,
             backend: &mut backend,
@@ -253,6 +280,8 @@ mod tests {
                 index: 0,
                 pid: Some(77),
                 running: true,
+                active_state: Some("active".to_string()),
+                sub_state: Some("running".to_string()),
             }),
         )
         .await

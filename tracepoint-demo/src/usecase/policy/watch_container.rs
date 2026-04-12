@@ -26,6 +26,59 @@ pub struct ContainerSeedSpec<'a> {
     pub all_processes: bool,
 }
 
+fn format_optional_pid(pid: Option<u32>) -> String {
+    pid.map(|pid| pid.to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn log_container_runtime_change<TReporter: StatusReporter + ?Sized>(
+    reporter: &mut TReporter,
+    runtime: &ContainerRuntime,
+    next_pid: Option<u32>,
+    extra_pids: &[u32],
+) {
+    if runtime.current_pid != next_pid {
+        let mut details = Vec::new();
+
+        if runtime.current_pid.is_some() != next_pid.is_some() {
+            details.push(format!(
+                "state {} -> {}",
+                if runtime.current_pid.is_some() {
+                    "running"
+                } else {
+                    "not-running"
+                },
+                if next_pid.is_some() {
+                    "running"
+                } else {
+                    "not-running"
+                }
+            ));
+        }
+
+        details.push(format!(
+            "pid {} -> {}",
+            format_optional_pid(runtime.current_pid),
+            format_optional_pid(next_pid)
+        ));
+
+        reporter.info(format!(
+            "container {} changed: {}",
+            runtime.name_or_id,
+            details.join(", ")
+        ));
+    }
+
+    if !extra_pids.is_empty() {
+        reporter.info(format!(
+            "container {} detected additional pid(s): {:?} (main pid={})",
+            runtime.name_or_id,
+            extra_pids,
+            format_optional_pid(next_pid)
+        ));
+    }
+}
+
 pub(crate) async fn seed_container_processes<TReporter: StatusReporter + ?Sized>(
     process_seed: &mut dyn ProcessSeedPort,
     reporter: &mut TReporter,
@@ -120,6 +173,7 @@ pub async fn apply_container_runtime_update<TReporter: StatusReporter + ?Sized>(
         runtime.seeded_pids.clear();
     }
 
+    log_container_runtime_change(reporter, runtime, next_pid, extra_pids);
     runtime.current_pid = next_pid;
     log::debug!(
         "container {} current pid updated to {:?}",
@@ -322,8 +376,20 @@ mod tests {
         process_seed
             .expect_seed_direct()
             .times(1)
+            .withf(|pids, flags| pids == [99] && *flags == 0x2)
+            .return_once(|_, _| Ok(()));
+        process_seed
+            .expect_seed_direct()
+            .times(1)
             .withf(|pids, flags| pids == [42, 99] && *flags == 0x2)
             .return_once(|_, _| Ok(()));
+        reporter
+            .expect_info()
+            .times(1)
+            .withf(|message| {
+                message == "container web detected additional pid(s): [99] (main pid=42)"
+            })
+            .return_const(());
 
         apply_container_runtime_update(
             &mut process_seed,
@@ -331,7 +397,7 @@ mod tests {
             &mut runtime,
             Some(42),
             true,
-            &[],
+            &[99],
         )
         .await
         .unwrap();
@@ -390,6 +456,54 @@ mod tests {
             .times(1)
             .withf(|pids, flags| pids == [77] && *flags == 0x2)
             .return_once(|_, _| Ok(()));
+        reporter
+            .expect_info()
+            .times(1)
+            .withf(|message| {
+                message == "container web changed: state not-running -> running, pid none -> 77"
+            })
+            .return_const(());
+
+        apply_container_runtime_update(
+            &mut process_seed,
+            &mut reporter,
+            &mut runtime,
+            Some(77),
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(runtime.current_pid, Some(77));
+        assert_eq!(runtime.seeded_pids, vec![77]);
+    }
+
+    #[tokio::test]
+    async fn apply_container_runtime_update_logs_pid_change_for_recreated_container() {
+        let mut process_seed = MockProcessSeedPort::new();
+        let mut runtime = ContainerRuntime {
+            cgroup_port: Arc::new(MockCgroupPort::new()),
+            runtime: Arc::new(NoopContainerRuntimePort),
+            name_or_id: "web".to_string(),
+            watch_children: false,
+            all_processes: false,
+            flags: 0x2,
+            seeded_pids: vec![42],
+            current_pid: Some(42),
+        };
+        let mut reporter = MockStatusReporter::new();
+
+        process_seed
+            .expect_seed_direct()
+            .times(1)
+            .withf(|pids, flags| pids == [77] && *flags == 0x2)
+            .return_once(|_, _| Ok(()));
+        reporter
+            .expect_info()
+            .times(1)
+            .withf(|message| message == "container web changed: pid 42 -> 77")
+            .return_const(());
 
         apply_container_runtime_update(
             &mut process_seed,

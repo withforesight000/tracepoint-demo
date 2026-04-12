@@ -191,6 +191,8 @@ mod tests {
             flags: 0x8,
             current_pid: None,
             current_running: false,
+            current_active_state: Some("inactive".to_string()),
+            current_sub_state: Some("dead".to_string()),
         }];
 
         let result = collect_watch_roots(&static_roots, &container_runtimes, &systemd_runtimes);

@@ -191,6 +191,8 @@ Some terms appear repeatedly in the code and are easy to confuse on a first read
 - watch set: the final merged PID set written into `WATCH_PIDS`
 - `PROC_STATE`: kernel-side per-process cache used while following descendants
 - runtime update: a userspace message saying that container or systemd state changed
+- runtime updates also drive user-visible transition notices so restarts, recreation, and new
+  replacement PIDs are visible without enabling debug logging
 
 ## Why this split exists
 

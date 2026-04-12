@@ -56,6 +56,8 @@ Startup behavior:
 - Runtime target entries in that `PIDs:` list mark the main process as `main=...` and list
   additional seeded processes as `pid=...`.
 - Container and systemd targets refresh their main PID while the daemon is running.
+- Container and systemd targets print runtime state-change notices, including resolved replacement
+  PIDs after restarts or recreation.
 - `--all-container-processes` also refreshes container state when Docker reports exec activity
   inside the container. A fast cgroup probe seeds the new exec pid, and child commands launched
   from that shell inherit watch state at exec time, so direct `docker exec`, `docker compose exec`,

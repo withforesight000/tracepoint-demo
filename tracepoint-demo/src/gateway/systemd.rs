@@ -15,7 +15,7 @@ use crate::usecase::port::{
     SystemdUnitRuntimeStatus,
 };
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SystemdUnitStatus {
     pub active_state: String,
     pub sub_state: String,
@@ -295,44 +295,37 @@ where
     TQuery: FnMut() -> TQueryFuture,
     TQueryFuture: Future<Output = Result<SystemdUnitStatus, SystemdUnitLookupError>>,
 {
-    let mut current = (initial_status.main_pid, initial_status.is_running());
-    let _ = tx.send(RuntimeUpdate::SystemdStatus {
-        index,
-        pid: current.0,
-        running: current.1,
-    });
+    let send_status_update = |status: Option<&SystemdUnitStatus>| {
+        let _ = tx.send(RuntimeUpdate::SystemdStatus {
+            index,
+            pid: status.and_then(|status| status.main_pid),
+            running: status.is_some_and(SystemdUnitStatus::is_running),
+            active_state: status.map(|status| status.active_state.clone()),
+            sub_state: status.map(|status| status.sub_state.clone()),
+        });
+    };
+
+    let mut current = initial_status;
+    send_status_update(Some(&current));
 
     loop {
         if !wait_for_change().await? {
-            let _ = tx.send(RuntimeUpdate::SystemdStatus {
-                index,
-                pid: None,
-                running: false,
-            });
+            send_status_update(None);
             return Ok(());
         }
 
         let status = match query_status().await {
             Ok(status) => status,
             Err(SystemdUnitLookupError::NotFound) => {
-                let _ = tx.send(RuntimeUpdate::SystemdStatus {
-                    index,
-                    pid: None,
-                    running: false,
-                });
+                send_status_update(None);
                 return Ok(());
             }
             Err(SystemdUnitLookupError::Other(err)) => return Err(err),
         };
 
-        let next = (status.main_pid, status.is_running());
-        if next != current {
-            current = next;
-            let _ = tx.send(RuntimeUpdate::SystemdStatus {
-                index,
-                pid: current.0,
-                running: current.1,
-            });
+        if status != current {
+            current = status;
+            send_status_update(Some(&current));
         }
     }
 }
@@ -508,23 +501,31 @@ mod tests {
             RuntimeUpdate::SystemdStatus {
                 index: 2,
                 pid: Some(10),
-                running: true
+                running: true,
+                active_state: Some(ref active_state),
+                sub_state: Some(ref sub_state),
             }
+            if active_state == "active" && sub_state == "running"
         ));
         assert!(matches!(
             updates[1],
             RuntimeUpdate::SystemdStatus {
                 index: 2,
                 pid: Some(22),
-                running: true
+                running: true,
+                active_state: Some(ref active_state),
+                sub_state: Some(ref sub_state),
             }
+            if active_state == "active" && sub_state == "running"
         ));
         assert!(matches!(
             updates[2],
             RuntimeUpdate::SystemdStatus {
                 index: 2,
                 pid: None,
-                running: false
+                running: false,
+                active_state: None,
+                sub_state: None,
             }
         ));
     }
@@ -562,15 +563,20 @@ mod tests {
             RuntimeUpdate::SystemdStatus {
                 index: 0,
                 pid: Some(7),
-                running: true
+                running: true,
+                active_state: Some(ref active_state),
+                sub_state: Some(ref sub_state),
             }
+            if active_state == "active" && sub_state == "running"
         ));
         assert!(matches!(
             updates[1],
             RuntimeUpdate::SystemdStatus {
                 index: 0,
                 pid: None,
-                running: false
+                running: false,
+                active_state: None,
+                sub_state: None,
             }
         ));
     }
@@ -613,8 +619,11 @@ mod tests {
             RuntimeUpdate::SystemdStatus {
                 index: 1,
                 pid: Some(9),
-                running: true
+                running: true,
+                active_state: Some(ref active_state),
+                sub_state: Some(ref sub_state),
             }
+            if active_state == "active" && sub_state == "running"
         ));
     }
 }

@@ -153,8 +153,7 @@ fn format_runtime_pid_labels(
     }
 
     labels.extend(
-        pids
-            .into_iter()
+        pids.into_iter()
             .map(|pid| format!("{scope}:{name}:pid={pid}")),
     );
     labels
@@ -353,6 +352,8 @@ mod tests {
             flags: 2,
             current_pid: Some(2),
             current_running: true,
+            current_active_state: Some("active".to_string()),
+            current_sub_state: Some("running".to_string()),
         };
 
         let desc = collect_target_descriptions(&[container], &[systemd_runtime], false, false);
@@ -389,6 +390,8 @@ mod tests {
             flags: 2,
             current_pid: Some(2),
             current_running: true,
+            current_active_state: Some("active".to_string()),
+            current_sub_state: Some("running".to_string()),
         };
 
         let desc = collect_target_descriptions(&[], &[systemd_runtime], false, true);
@@ -417,6 +420,8 @@ mod tests {
             flags: 2,
             current_pid: Some(20),
             current_running: true,
+            current_active_state: Some("active".to_string()),
+            current_sub_state: Some("running".to_string()),
         };
 
         let labels = collect_startup_watch_pid_labels(

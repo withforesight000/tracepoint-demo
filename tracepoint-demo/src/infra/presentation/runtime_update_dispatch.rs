@@ -15,6 +15,8 @@ pub trait RuntimeUpdateHandler {
         index: usize,
         pid: Option<u32>,
         running: bool,
+        active_state: Option<String>,
+        sub_state: Option<String>,
     ) -> anyhow::Result<()>;
 }
 
@@ -38,8 +40,12 @@ pub async fn handle_runtime_update<H: RuntimeUpdateHandler>(
             index,
             pid,
             running,
+            active_state,
+            sub_state,
         }) => {
-            handler.apply_systemd_status(index, pid, running).await?;
+            handler
+                .apply_systemd_status(index, pid, running, active_state, sub_state)
+                .await?;
             Ok(true)
         }
         Some(RuntimeUpdate::MonitorError { label, error }) => {
@@ -56,7 +62,7 @@ mod tests {
     #[derive(Default)]
     struct FakeRuntimeUpdateHandler {
         container_calls: Vec<(usize, Option<u32>)>,
-        systemd_calls: Vec<(usize, Option<u32>, bool)>,
+        systemd_calls: Vec<(usize, Option<u32>, bool, Option<String>, Option<String>)>,
         container_error: Option<&'static str>,
         systemd_error: Option<&'static str>,
     }
@@ -81,11 +87,14 @@ mod tests {
             index: usize,
             pid: Option<u32>,
             running: bool,
+            active_state: Option<String>,
+            sub_state: Option<String>,
         ) -> anyhow::Result<()> {
             if let Some(message) = self.systemd_error {
                 return Err(anyhow::anyhow!(message));
             }
-            self.systemd_calls.push((index, pid, running));
+            self.systemd_calls
+                .push((index, pid, running, active_state, sub_state));
             Ok(())
         }
     }
@@ -121,13 +130,24 @@ mod tests {
                 index: 1,
                 pid: Some(7),
                 running: true,
+                active_state: Some("active".to_string()),
+                sub_state: Some("running".to_string()),
             }),
         )
         .await
         .unwrap();
 
         assert!(keep_running);
-        assert_eq!(handler.systemd_calls, vec![(1, Some(7), true)]);
+        assert_eq!(
+            handler.systemd_calls,
+            vec![(
+                1,
+                Some(7),
+                true,
+                Some("active".to_string()),
+                Some("running".to_string())
+            )]
+        );
         assert!(handler.container_calls.is_empty());
     }
 

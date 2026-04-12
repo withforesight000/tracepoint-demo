@@ -190,6 +190,8 @@ pub async fn initialize_systemd_runtimes<
             flags: unit_flags,
             current_pid: status.main_pid,
             current_running,
+            current_active_state: status.active_state.clone(),
+            current_sub_state: status.sub_state.clone(),
         });
     }
 

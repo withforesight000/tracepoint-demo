@@ -180,6 +180,8 @@ impl RuntimeUpdateHandler for RuntimeUpdateHarness {
         index: usize,
         pid: Option<u32>,
         running: bool,
+        active_state: Option<String>,
+        sub_state: Option<String>,
     ) -> anyhow::Result<()> {
         let runtime = self
             .systemd_runtimes
@@ -191,6 +193,8 @@ impl RuntimeUpdateHandler for RuntimeUpdateHarness {
             runtime,
             pid,
             running,
+            active_state,
+            sub_state,
         )
         .await?;
         self.refresh_watch_pids()
@@ -578,6 +582,8 @@ async fn handle_runtime_update_clears_and_reseeds_systemd_roots() {
             index: 0,
             pid: None,
             running: false,
+            active_state: None,
+            sub_state: None,
         }),
     )
     .await
@@ -597,6 +603,8 @@ async fn handle_runtime_update_clears_and_reseeds_systemd_roots() {
             index: 0,
             pid: Some(40),
             running: true,
+            active_state: Some("active".to_string()),
+            sub_state: Some("running".to_string()),
         }),
     )
     .await

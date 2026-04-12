@@ -17,6 +17,8 @@ pub struct SystemdRuntime {
     pub flags: u32,
     pub current_pid: Option<u32>,
     pub current_running: bool,
+    pub current_active_state: Option<String>,
+    pub current_sub_state: Option<String>,
 }
 
 pub struct SystemdSeedSpec<'a> {
@@ -25,6 +27,59 @@ pub struct SystemdSeedSpec<'a> {
     pub flags: u32,
     pub watch_children: bool,
     pub all_processes: bool,
+}
+
+fn format_optional_pid(pid: Option<u32>) -> String {
+    pid.map(|pid| pid.to_string())
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn format_systemd_state(active_state: Option<&str>, sub_state: Option<&str>) -> String {
+    match (active_state, sub_state) {
+        (Some(active_state), Some(sub_state)) => format!("{active_state}/{sub_state}"),
+        (Some(active_state), None) => active_state.to_string(),
+        (None, Some(sub_state)) => sub_state.to_string(),
+        (None, None) => "missing".to_string(),
+    }
+}
+
+fn log_systemd_runtime_change<TReporter: StatusReporter + ?Sized>(
+    reporter: &mut TReporter,
+    runtime: &SystemdRuntime,
+    next_pid: Option<u32>,
+    next_active_state: Option<&str>,
+    next_sub_state: Option<&str>,
+) {
+    let previous_state = format_systemd_state(
+        runtime.current_active_state.as_deref(),
+        runtime.current_sub_state.as_deref(),
+    );
+    let next_state = format_systemd_state(next_active_state, next_sub_state);
+    let state_changed = runtime.current_active_state.as_deref() != next_active_state
+        || runtime.current_sub_state.as_deref() != next_sub_state;
+    let pid_changed = runtime.current_pid != next_pid;
+
+    if !state_changed && !pid_changed {
+        return;
+    }
+
+    let mut details = Vec::new();
+    if state_changed {
+        details.push(format!("state {} -> {}", previous_state, next_state));
+    }
+    if pid_changed {
+        details.push(format!(
+            "MainPID {} -> {}",
+            format_optional_pid(runtime.current_pid),
+            format_optional_pid(next_pid)
+        ));
+    }
+
+    reporter.info(format!(
+        "systemd unit {} changed: {}",
+        runtime.unit_name,
+        details.join(", ")
+    ));
 }
 
 pub async fn wait_systemd_unit_running<
@@ -127,31 +182,51 @@ pub async fn apply_systemd_runtime_update<TReporter: StatusReporter + ?Sized>(
     runtime: &mut SystemdRuntime,
     next_pid: Option<u32>,
     running: bool,
+    active_state: Option<String>,
+    sub_state: Option<String>,
 ) -> anyhow::Result<()> {
-    if runtime.current_pid == next_pid && runtime.current_running == running {
+    if runtime.current_pid == next_pid
+        && runtime.current_running == running
+        && runtime.current_active_state == active_state
+        && runtime.current_sub_state == sub_state
+    {
         return Ok(());
     }
 
-    if running && (runtime.all_processes || next_pid.is_some()) {
-        runtime.seeded_pids = seed_systemd_unit_processes(
-            process_seed,
-            reporter,
-            runtime.runtime.as_ref(),
-            SystemdSeedSpec {
-                unit_name: &runtime.unit_name,
-                main_pid: next_pid,
-                flags: runtime.flags,
-                watch_children: runtime.watch_children,
-                all_processes: runtime.all_processes,
-            },
-        )
-        .await?;
-    } else if !running {
-        runtime.seeded_pids.clear();
+    let watch_membership_changed =
+        runtime.current_pid != next_pid || runtime.current_running != running;
+
+    if watch_membership_changed {
+        if running && (runtime.all_processes || next_pid.is_some()) {
+            runtime.seeded_pids = seed_systemd_unit_processes(
+                process_seed,
+                reporter,
+                runtime.runtime.as_ref(),
+                SystemdSeedSpec {
+                    unit_name: &runtime.unit_name,
+                    main_pid: next_pid,
+                    flags: runtime.flags,
+                    watch_children: runtime.watch_children,
+                    all_processes: runtime.all_processes,
+                },
+            )
+            .await?;
+        } else if !running {
+            runtime.seeded_pids.clear();
+        }
     }
 
+    log_systemd_runtime_change(
+        reporter,
+        runtime,
+        next_pid,
+        active_state.as_deref(),
+        sub_state.as_deref(),
+    );
     runtime.current_pid = next_pid;
     runtime.current_running = running;
+    runtime.current_active_state = active_state;
+    runtime.current_sub_state = sub_state;
     Ok(())
 }
 
@@ -362,6 +437,8 @@ mod tests {
             flags: 0x2,
             current_pid: Some(12),
             current_running: true,
+            current_active_state: Some("active".to_string()),
+            current_sub_state: Some("running".to_string()),
         };
         let mut reporter = MockStatusReporter::new();
 
@@ -371,6 +448,8 @@ mod tests {
             &mut runtime,
             Some(12),
             true,
+            Some("active".to_string()),
+            Some("running".to_string()),
         )
         .await
         .unwrap();
@@ -417,8 +496,18 @@ mod tests {
             flags: 0x2,
             current_pid: None,
             current_running: false,
+            current_active_state: Some("inactive".to_string()),
+            current_sub_state: Some("dead".to_string()),
         };
         let mut reporter = MockStatusReporter::new();
+        reporter
+            .expect_info()
+            .times(1)
+            .withf(|message| {
+                message
+                    == "systemd unit demo.service changed: state inactive/dead -> active/running, MainPID none -> 88"
+            })
+            .return_const(());
 
         apply_systemd_runtime_update(
             &mut process_seed,
@@ -426,11 +515,58 @@ mod tests {
             &mut runtime,
             Some(88),
             true,
+            Some("active".to_string()),
+            Some("running".to_string()),
         )
         .await
         .unwrap();
 
         assert_eq!(runtime.current_pid, Some(88));
         assert!(runtime.current_running);
+        assert_eq!(runtime.current_active_state.as_deref(), Some("active"));
+        assert_eq!(runtime.current_sub_state.as_deref(), Some("running"));
+    }
+
+    #[tokio::test]
+    async fn apply_systemd_runtime_update_logs_state_only_changes() {
+        let mut process_seed = MockProcessSeedPort::new();
+        let mut runtime = SystemdRuntime {
+            runtime: Arc::new(NoopSystemdRuntimePort),
+            unit_name: "demo.service".to_string(),
+            watch_children: false,
+            all_processes: false,
+            seeded_pids: vec![12],
+            flags: 0x2,
+            current_pid: Some(12),
+            current_running: true,
+            current_active_state: Some("active".to_string()),
+            current_sub_state: Some("running".to_string()),
+        };
+        let mut reporter = MockStatusReporter::new();
+        reporter
+            .expect_info()
+            .times(1)
+            .withf(|message| {
+                message
+                    == "systemd unit demo.service changed: state active/running -> reloading/reload"
+            })
+            .return_const(());
+
+        apply_systemd_runtime_update(
+            &mut process_seed,
+            &mut reporter,
+            &mut runtime,
+            Some(12),
+            true,
+            Some("reloading".to_string()),
+            Some("reload".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(runtime.current_pid, Some(12));
+        assert!(runtime.current_running);
+        assert_eq!(runtime.current_active_state.as_deref(), Some("reloading"));
+        assert_eq!(runtime.current_sub_state.as_deref(), Some("reload"));
     }
 }

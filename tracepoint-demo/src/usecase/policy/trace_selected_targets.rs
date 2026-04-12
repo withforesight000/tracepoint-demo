@@ -88,6 +88,8 @@ mod tests {
             flags: 0x2,
             current_pid: Some(20),
             current_running: true,
+            current_active_state: Some("active".to_string()),
+            current_sub_state: Some("running".to_string()),
         }];
 
         let handles = spawn_monitors_for_runtimes(&container_runtimes, &systemd_runtimes, &tx);

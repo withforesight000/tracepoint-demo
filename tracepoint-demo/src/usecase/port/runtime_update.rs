@@ -12,6 +12,8 @@ pub enum RuntimeUpdate {
         index: usize,
         pid: Option<u32>,
         running: bool,
+        active_state: Option<String>,
+        sub_state: Option<String>,
     },
     MonitorError {
         label: String,
