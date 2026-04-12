@@ -21,12 +21,13 @@ pub struct ExecEvent {
     pub syscall_id: u32,
     pub comm: [u8; EXEC_EVENT_COMM_SIZE],
     pub filename: [u8; EXEC_EVENT_FILENAME_SIZE],
-    pub argv0: [u8; EXEC_EVENT_ARGV0_SIZE],
+    pub argv: [[u8; EXEC_EVENT_ARG_SLOT_SIZE]; EXEC_EVENT_ARG_SLOTS],
 }
 
 pub const EXEC_EVENT_COMM_SIZE: usize = 16;
 pub const EXEC_EVENT_FILENAME_SIZE: usize = 128;
-pub const EXEC_EVENT_ARGV0_SIZE: usize = 128;
+pub const EXEC_EVENT_ARG_SLOT_SIZE: usize = 64;
+pub const EXEC_EVENT_ARG_SLOTS: usize = 5;
 
 pub const EXEC_EVENTS_MAP: &str = "EXEC_EVENTS";
 pub const WATCH_PIDS_MAP: &str = "WATCH_PIDS";
@@ -43,7 +44,7 @@ mod tests {
     #[test]
     fn taskrel_and_exec_event_sizes_are_valid() {
         assert_eq!(mem::size_of::<TaskRel>(), 72);
-        assert_eq!(mem::size_of::<ExecEvent>(), 304);
+        assert_eq!(mem::size_of::<ExecEvent>(), 496);
     }
 
     #[test]

@@ -114,8 +114,11 @@ cargo tarpaulin --skip-clean -p tracepoint-demo --lib \
 Each line of output looks like:
 
 ```text
-[0.123456] pid=1234 tid=1234 uid=1000 gid=1000 syscall_id=59 comm="bash" filename="/usr/bin/bash" argv0="bash"
+[0.123456] pid=1234 tid=1234 uid=1000 gid=1000 syscall_id=59 comm="bash" filename="/usr/bin/bash" argv="bash -lc ls -la"
 ```
+
+`argv` includes the first five captured `execve` arguments, so flag sequences such as `ls -la` are
+visible in the trace output.
 
 Set `RUST_LOG=tracepoint_demo=debug` to show the binary's debug logs.
 

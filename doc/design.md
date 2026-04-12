@@ -19,6 +19,8 @@ Before diving into the layers, keep this mental model in mind:
 - usecases decide what should be watched and how updates should be applied
 - gateways talk to eBPF, procfs, Docker, and systemd
 - the eBPF side emits `execve` events for watched processes and userspace prints them
+- each printed exec event includes the executable path plus the first five captured `argv` entries
+  so command flags such as `ls -la` remain visible at the presentation edge
 
 The workspace is split across three crates:
 

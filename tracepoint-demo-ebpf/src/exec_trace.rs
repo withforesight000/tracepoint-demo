@@ -5,15 +5,12 @@ use aya_ebpf::{
     },
     programs::TracePointContext,
 };
+use core::ptr;
 
 use tracepoint_demo_common::ExecEvent;
 use tracepoint_demo_ebpf::{split_pid_tgid, split_uid_gid};
 
-use crate::{
-    maps::{ARGV0_BUF, EXEC_EVENTS, FNAME_BUF},
-    vmlinux::trace_event_raw_sys_enter,
-    watch::resolve_watch_flags,
-};
+use crate::{maps::EXEC_EVENTS, vmlinux::trace_event_raw_sys_enter, watch::resolve_watch_flags};
 
 pub(crate) unsafe fn handle_exec_trace(ctx: TracePointContext) -> Result<u32, i64> {
     let raw: trace_event_raw_sys_enter = unsafe { ctx.read_at(0) }?;
@@ -28,64 +25,54 @@ pub(crate) unsafe fn handle_exec_trace(ctx: TracePointContext) -> Result<u32, i6
         return Ok(0);
     }
 
-    let mut comm = [0u8; 16];
-    if let Ok(value) = bpf_get_current_comm() {
-        comm = value;
-    }
-
-    let filename = unsafe { read_filename(&raw) };
-    let argv0 = unsafe { read_argv0(&raw) };
-
     if let Some(mut entry) = EXEC_EVENTS.reserve::<ExecEvent>(0) {
-        let _ = entry.write(ExecEvent {
-            ktime_ns: unsafe { bpf_ktime_get_ns() },
-            pid,
-            tid,
-            uid,
-            gid,
-            syscall_id: raw.id as u32,
-            comm,
-            filename,
-            argv0,
-        });
+        let event = entry.as_mut_ptr();
+        unsafe { ptr::write_bytes(event, 0, 1) };
+        unsafe {
+            (*event).ktime_ns = bpf_ktime_get_ns();
+            (*event).pid = pid;
+            (*event).tid = tid;
+            (*event).uid = uid;
+            (*event).gid = gid;
+            (*event).syscall_id = raw.id as u32;
+            if let Ok(comm) = bpf_get_current_comm() {
+                (*event).comm = comm;
+            }
+            read_filename(&raw, &mut (*event).filename);
+            let argv_ptr = raw.args[1] as *const *const u8;
+            read_arg(argv_ptr, 0, &mut (*event).argv[0]);
+            read_arg(argv_ptr, 1, &mut (*event).argv[1]);
+            read_arg(argv_ptr, 2, &mut (*event).argv[2]);
+            read_arg(argv_ptr, 3, &mut (*event).argv[3]);
+            read_arg(argv_ptr, 4, &mut (*event).argv[4]);
+        }
         entry.submit(0);
     }
 
     Ok(0)
 }
 
-unsafe fn read_filename(raw: &trace_event_raw_sys_enter) -> [u8; 128] {
-    let mut filename = [0u8; 128];
+unsafe fn read_filename(raw: &trace_event_raw_sys_enter, filename: &mut [u8; 128]) {
     let filename_addr = raw.args[0] as *const u8;
     if filename_addr.is_null() {
-        return filename;
+        return;
     }
 
-    if let Some(ptr) = FNAME_BUF.get_ptr_mut(0) {
-        let buf = unsafe { &mut *ptr };
-        let _ = unsafe { bpf_probe_read_user_str_bytes(filename_addr, buf) };
-        filename = *buf;
-    }
-
-    filename
+    let _ = unsafe { bpf_probe_read_user_str_bytes(filename_addr, filename) };
 }
 
-unsafe fn read_argv0(raw: &trace_event_raw_sys_enter) -> [u8; 128] {
-    let mut argv0 = [0u8; 128];
-    let argv_ptr = raw.args[1] as *const *const u8;
+unsafe fn read_arg(argv_ptr: *const *const u8, arg_index: usize, dst: &mut [u8; 64]) {
     if argv_ptr.is_null() {
-        return argv0;
+        return;
     }
 
-    if let Ok(arg0_ptr) = unsafe { bpf_probe_read_user::<*const u8>(argv_ptr) } {
-        if !arg0_ptr.is_null() {
-            if let Some(ptr) = ARGV0_BUF.get_ptr_mut(0) {
-                let buf = unsafe { &mut *ptr };
-                let _ = unsafe { bpf_probe_read_user_str_bytes(arg0_ptr, buf) };
-                argv0 = *buf;
-            }
-        }
+    let arg_slot = unsafe { argv_ptr.add(arg_index) };
+    let Ok(arg_ptr) = (unsafe { bpf_probe_read_user::<*const u8>(arg_slot) }) else {
+        return;
+    };
+    if arg_ptr.is_null() {
+        return;
     }
 
-    argv0
+    let _ = unsafe { bpf_probe_read_user_str_bytes(arg_ptr, dst) };
 }

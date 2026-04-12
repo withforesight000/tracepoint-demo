@@ -1,6 +1,6 @@
 use tracepoint_demo_common::ExecEvent;
 
-use crate::{gateway::ebpf::cstr_from_u8, usecase::port::StatusReporter};
+use crate::{gateway::ebpf::cstr_from_u8_escaped, usecase::port::StatusReporter};
 
 fn startup_notice_message(
     watched_root_pids: &[String],
@@ -53,17 +53,27 @@ fn shutdown_message() -> &'static str {
 fn exec_event_message(event: &ExecEvent) -> String {
     format!(
         "[{:.6}] pid={} tid={} uid={} gid={} syscall_id={} \
-         comm=\"{}\" filename=\"{}\" argv0=\"{}\"",
+         comm=\"{}\" filename=\"{}\" argv=\"{}\"",
         event.ktime_ns as f64 / 1e9,
         event.pid,
         event.tid,
         event.uid,
         event.gid,
         event.syscall_id,
-        cstr_from_u8(&event.comm),
-        cstr_from_u8(&event.filename),
-        cstr_from_u8(&event.argv0),
+        cstr_from_u8_escaped(&event.comm),
+        cstr_from_u8_escaped(&event.filename),
+        exec_argv_string(event),
     )
+}
+
+fn exec_argv_string(event: &ExecEvent) -> String {
+    event
+        .argv
+        .iter()
+        .map(|slot| cstr_from_u8_escaped(slot))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn invalid_exec_event_size_message(actual: usize, expected: usize) -> String {
@@ -189,7 +199,8 @@ mod tests {
             syscall_id: 59,
             comm: [0; tracepoint_demo_common::EXEC_EVENT_COMM_SIZE],
             filename: [0; tracepoint_demo_common::EXEC_EVENT_FILENAME_SIZE],
-            argv0: [0; tracepoint_demo_common::EXEC_EVENT_ARGV0_SIZE],
+            argv: [[0; tracepoint_demo_common::EXEC_EVENT_ARG_SLOT_SIZE];
+                tracepoint_demo_common::EXEC_EVENT_ARG_SLOTS],
         };
 
         let message = exec_event_message(&event);
@@ -197,14 +208,36 @@ mod tests {
         assert!(message.contains("[0.123000]"));
         assert!(message.contains("pid=10"));
         assert!(message.contains("syscall_id=59"));
+        assert!(message.contains("argv=\"\""));
     }
 
     #[test]
     fn invalid_exec_event_size_message_is_descriptive() {
         assert_eq!(
-            invalid_exec_event_size_message(12, 304),
-            "unexpected ExecEvent size: 12 (expected 304)"
+            invalid_exec_event_size_message(12, 496),
+            "unexpected ExecEvent size: 12 (expected 496)"
         );
+    }
+
+    #[test]
+    fn exec_event_message_escapes_non_utf8_bytes() {
+        let mut event = ExecEvent {
+            ktime_ns: 123_000_000,
+            pid: 10,
+            tid: 10,
+            uid: 1000,
+            gid: 1000,
+            syscall_id: 59,
+            comm: [0; tracepoint_demo_common::EXEC_EVENT_COMM_SIZE],
+            filename: [0; tracepoint_demo_common::EXEC_EVENT_FILENAME_SIZE],
+            argv: [[0; tracepoint_demo_common::EXEC_EVENT_ARG_SLOT_SIZE];
+                tracepoint_demo_common::EXEC_EVENT_ARG_SLOTS],
+        };
+        event.argv[0][..7].copy_from_slice(b"uname \xff");
+
+        let message = exec_event_message(&event);
+
+        assert!(message.contains("argv=\"uname \\xff\""));
     }
 
     #[test]
@@ -225,9 +258,10 @@ mod tests {
             syscall_id: 59,
             comm: [0; tracepoint_demo_common::EXEC_EVENT_COMM_SIZE],
             filename: [0; tracepoint_demo_common::EXEC_EVENT_FILENAME_SIZE],
-            argv0: [0; tracepoint_demo_common::EXEC_EVENT_ARGV0_SIZE],
+            argv: [[0; tracepoint_demo_common::EXEC_EVENT_ARG_SLOT_SIZE];
+                tracepoint_demo_common::EXEC_EVENT_ARG_SLOTS],
         });
-        print_invalid_exec_event_size(12, 304);
+        print_invalid_exec_event_size(12, 496);
     }
 
     #[test]

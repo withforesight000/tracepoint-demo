@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap as StdHashMap, HashSet, VecDeque},
     convert::TryFrom,
+    fmt::Write as _,
     io::Read,
     mem, ptr,
 };
@@ -46,6 +47,27 @@ impl ProcessSeedPort for EbpfProcessSeedPort<'_> {
 pub fn cstr_from_u8(bytes: &[u8]) -> String {
     let len = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..len]).into_owned()
+}
+
+pub fn cstr_from_u8_escaped(bytes: &[u8]) -> String {
+    let len = bytes.iter().position(|&c| c == 0).unwrap_or(bytes.len());
+    let mut out = String::new();
+
+    for &byte in &bytes[..len] {
+        match byte {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            0x20..=0x7e => out.push(byte as char),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            _ => {
+                let _ = write!(out, "\\x{byte:02x}");
+            }
+        }
+    }
+
+    out
 }
 
 pub fn drain_exec_events<TEvent, TInvalid>(
@@ -300,5 +322,17 @@ mod tests {
     fn cstr_from_u8_returns_full_string_no_nul() {
         let bytes = b"foobar";
         assert_eq!(cstr_from_u8(bytes), "foobar");
+    }
+
+    #[test]
+    fn cstr_from_u8_escaped_preserves_printable_ascii() {
+        let bytes = b"uname -sm\0tail";
+        assert_eq!(cstr_from_u8_escaped(bytes), "uname -sm");
+    }
+
+    #[test]
+    fn cstr_from_u8_escaped_escapes_quotes_backslashes_and_binary_bytes() {
+        let bytes = b"bad\"\\\\\n\t\xff\0";
+        assert_eq!(cstr_from_u8_escaped(bytes), "bad\\\"\\\\\\\\\\n\\t\\xff");
     }
 }
