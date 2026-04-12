@@ -1,0 +1,8 @@
+- name: Install stable Rust toolchain
+  uses: dtolnay/rust-toolchain@stable
+
+- name: Install nightly Rust toolchain for eBPF builds
+  run: rustup toolchain install nightly --profile minimal --component rust-src
+
+- name: Install bpf-linker
+  run: cargo install --locked bpf-linker

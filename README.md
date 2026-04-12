@@ -25,6 +25,11 @@ activity for selected processes.
 cargo build --release
 ```
 
+## Releases
+
+Tagged releases are published on GitHub Releases. Push a semver tag such as `0.1.0` to produce
+Linux archives for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`.
+
 ## Run
 
 ```bash

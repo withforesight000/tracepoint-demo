@@ -15,3 +15,6 @@ which = { workspace = true }
 [[bin]]
 name = "tracepoint-demo"
 path = "src/main.rs"
+
+[package.metadata.dist]
+dist = false

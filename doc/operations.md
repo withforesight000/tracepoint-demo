@@ -95,3 +95,19 @@ different kernel:
 cd tracepoint-demo-ebpf
 aya-tool generate trace_event_raw_sys_enter trace_event_raw_sched_process_fork task_struct bpf_iter_meta bpf_iter__task > src/vmlinux.rs
 ```
+
+## Releases
+
+Releases are cut from git tags. Push a semver tag such as `0.1.0` to trigger the GitHub release
+workflow:
+
+```bash
+git tag 0.1.0
+git push origin 0.1.0
+```
+
+The release workflow builds Linux artifacts for `x86_64-unknown-linux-gnu` and
+`aarch64-unknown-linux-gnu` on GitHub-hosted runners, then publishes them to GitHub Releases.
+
+Release notes are generated from `CHANGELOG.md`. The 0.1.0 entry is intentionally labeled
+`Initial Release`, and later releases can add version-specific notes under the matching heading.

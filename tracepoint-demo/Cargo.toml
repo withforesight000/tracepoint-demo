@@ -4,6 +4,12 @@ version = "0.1.0"
 edition.workspace = true
 
 license.workspace = true
+description = "Trace execve activity for selected processes with Aya and eBPF."
+repository = "https://github.com/withforesight000/tracepoint-demo"
+readme = "../README.md"
+
+[package.metadata.dist]
+changelog = "../CHANGELOG.md"
 
 [dependencies]
 tracepoint-demo-common = { path = "../tracepoint-demo-common", features = ["user"] }
