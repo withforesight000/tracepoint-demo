@@ -13,29 +13,22 @@ use crate::usecase::policy::trace_selected_targets::TraceRequest;
 ))]
 pub struct CliArgs {
     /// Repeated `--pid` arguments keep the option-style interface used in earlier versions.
+    /// They can be combined with positional PIDs, `--tty`, and runtime targets.
     #[arg(short = 'p', long = "pid", value_name = "PID")]
     pub pid: Vec<u32>,
 
     /// Positional PIDs can be used instead of `--pid`.
-    #[arg(value_name = "PID", conflicts_with_all = ["pid", "tty", "container", "systemd_unit"])]
+    /// They can also be combined with `--tty` and runtime targets.
+    #[arg(value_name = "PID")]
     pub positional_pids: Vec<u32>,
 
     /// Monitor processes that share the specified controlling terminal.
-    #[arg(
-        short = 't',
-        long = "tty",
-        value_name = "TTY",
-        conflicts_with_all = ["pid", "positional_pids", "container", "systemd_unit"]
-    )]
+    /// Can be combined with PID inputs, container, or systemd targets.
+    #[arg(short = 't', long = "tty", value_name = "TTY")]
     pub tty: Vec<String>,
 
     /// Monitor processes inside the specified Docker container (by name or ID).
-    #[arg(
-        short = 'c',
-        long = "container",
-        value_name = "NAME_OR_ID",
-        conflicts_with_all = ["pid", "positional_pids", "tty"]
-    )]
+    #[arg(short = 'c', long = "container", value_name = "NAME_OR_ID")]
     pub container: Vec<String>,
 
     /// Seed all processes currently in the container at startup.
@@ -44,12 +37,7 @@ pub struct CliArgs {
     pub all_container_processes: bool,
 
     /// Monitor processes inside the specified systemd unit.
-    #[arg(
-        short = 'u',
-        long = "systemd-unit",
-        value_name = "UNIT",
-        conflicts_with_all = ["pid", "positional_pids", "tty"]
-    )]
+    #[arg(short = 'u', long = "systemd-unit", value_name = "UNIT")]
     pub systemd_unit: Vec<String>,
 
     /// Seed all processes currently in the systemd unit at startup.

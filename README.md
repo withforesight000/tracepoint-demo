@@ -38,7 +38,8 @@ cargo build --release
 
 Target rules:
 
-- PID and TTY targets are standalone modes. They are not combined with container or systemd targets.
+- PID inputs and TTY filters are additive. You can combine `--pid`, positional PIDs, and `--tty`
+  in the same invocation, and you can also mix them with container or systemd targets.
 - Container and systemd targets can be combined in the same invocation.
 - `--no-watch-children` limits tracing to the selected roots.
 - `--all-container-processes` and `--all-systemd-processes` override `--no-watch-children` for
@@ -76,7 +77,8 @@ Examples:
 ```bash
 sudo cargo run --release -- --pid 1234 --pid 9012
 sudo cargo run --release -- 1234 9012 --no-watch-children
-sudo cargo run --release -- --tty /dev/pts/9
+sudo cargo run --release -- --tty /dev/pts/9 --pid 1234 9012
+sudo cargo run --release -- --tty /dev/pts/9 --systemd-unit sshd.service
 sudo cargo run --release -- --container my-service --container sidecar
 sudo cargo run --release -- --container my-service --systemd-unit sshd.service
 sudo cargo run --release -- --systemd-unit sshd.service --systemd-unit user@1000.service --all-systemd-processes

@@ -97,6 +97,31 @@ fn parses_repeatable_container_and_systemd_arguments_into_expected_trace_request
 }
 
 #[test]
+fn parses_mixed_pid_tty_container_and_systemd_arguments_into_expected_trace_request() {
+    let args = CliArgs::try_parse_from([
+        "tracepoint-demo",
+        "--tty",
+        "/dev/pts/3",
+        "--pid",
+        "10",
+        "20",
+        "--container",
+        "web",
+        "--systemd-unit",
+        "sshd.service",
+    ])
+    .unwrap();
+
+    let request = args.into_request();
+
+    assert_eq!(request.pids, vec![10, 20]);
+    assert_eq!(request.tty_inputs, vec!["/dev/pts/3".to_string()]);
+    assert_eq!(request.containers, vec!["web".to_string()]);
+    assert_eq!(request.systemd_units, vec!["sshd.service".to_string()]);
+    assert!(request.watch_children);
+}
+
+#[test]
 fn rejects_missing_target_arguments() {
     let err = parse_error(&["tracepoint-demo"]);
 
@@ -105,33 +130,6 @@ fn rejects_missing_target_arguments() {
         ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand | ErrorKind::MissingRequiredArgument
     ));
     assert!(err.to_string().contains("Usage: tracepoint-demo"));
-}
-
-#[test]
-fn rejects_pid_arguments_with_container_targets() {
-    let err = parse_error(&["tracepoint-demo", "--pid", "1", "--container", "web"]);
-
-    assert_eq!(err.kind().clone(), ErrorKind::ArgumentConflict, "{err}");
-}
-
-#[test]
-fn rejects_positional_pids_with_pid_arguments() {
-    let err = parse_error(&["tracepoint-demo", "--pid", "1", "2"]);
-
-    assert_eq!(err.kind().clone(), ErrorKind::ArgumentConflict, "{err}");
-}
-
-#[test]
-fn rejects_tty_arguments_with_systemd_targets() {
-    let err = parse_error(&[
-        "tracepoint-demo",
-        "--tty",
-        "pts1",
-        "--systemd-unit",
-        "sshd.service",
-    ]);
-
-    assert_eq!(err.kind().clone(), ErrorKind::ArgumentConflict, "{err}");
 }
 
 #[test]

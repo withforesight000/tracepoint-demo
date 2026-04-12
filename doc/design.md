@@ -14,7 +14,8 @@ It is intentionally both a design note and a reading guide:
 
 Before diving into the layers, keep this mental model in mind:
 
-- the CLI chooses target-selection modes such as PID, TTY, container, or systemd unit
+- the CLI gathers additive target-selection inputs such as PID, TTY, container, or systemd unit,
+  and startup merges the resulting seeds into one watch set
 - bootstrap code prepares concrete dependencies and starts the runtime
 - usecases decide what should be watched and how updates should be applied
 - gateways talk to eBPF, procfs, Docker, and systemd
