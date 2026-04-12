@@ -866,10 +866,7 @@ async fn handle_runtime_update_forces_refresh_for_container_exec_without_followi
             (42, watch_flags(false)),
         ]),
         static_watch_roots: HashMap::from([(10, watch_flags(false))]),
-        current_watch_roots: HashMap::from([
-            (10, watch_flags(false)),
-            (42, watch_flags(false)),
-        ]),
+        current_watch_roots: HashMap::from([(10, watch_flags(false)), (42, watch_flags(false))]),
         container_runtimes: vec![container_runtime],
         systemd_runtimes: vec![],
     };
@@ -937,10 +934,7 @@ async fn handle_runtime_update_clears_container_roots_when_pid_disappears() {
             (42, watch_flags(false)),
         ]),
         static_watch_roots: HashMap::from([(10, watch_flags(false))]),
-        current_watch_roots: HashMap::from([
-            (10, watch_flags(false)),
-            (42, watch_flags(false)),
-        ]),
+        current_watch_roots: HashMap::from([(10, watch_flags(false)), (42, watch_flags(false))]),
         container_runtimes: vec![container_runtime],
         systemd_runtimes: vec![],
     };
@@ -1144,10 +1138,7 @@ async fn handle_runtime_update_clears_systemd_roots_when_active_exited_loses_mai
             (88, watch_flags(false)),
         ]),
         static_watch_roots: HashMap::from([(10, watch_flags(false))]),
-        current_watch_roots: HashMap::from([
-            (10, watch_flags(false)),
-            (88, watch_flags(false)),
-        ]),
+        current_watch_roots: HashMap::from([(10, watch_flags(false)), (88, watch_flags(false))]),
         container_runtimes: vec![],
         systemd_runtimes: vec![systemd_runtime],
     };
