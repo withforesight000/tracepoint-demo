@@ -98,8 +98,8 @@ aya-tool generate trace_event_raw_sys_enter trace_event_raw_sched_process_fork t
 
 ## Releases
 
-Releases are cut from git tags. Push a semver tag such as `0.1.0` to trigger the GitHub release
-workflow:
+Releases are cut from git tags. Push a semver tag such as `0.1.0`; the CI workflow runs first, and
+if it succeeds it dispatches the GitHub release workflow:
 
 ```bash
 git tag 0.1.0
@@ -108,6 +108,8 @@ git push origin 0.1.0
 
 The release workflow builds Linux artifacts for `x86_64-unknown-linux-gnu` and
 `aarch64-unknown-linux-gnu` on GitHub-hosted runners, then publishes them to GitHub Releases.
+If you need to rerun the release step directly, the workflow is also available as a manual
+`workflow_dispatch` with a `tag` input.
 
 Release notes are generated from `CHANGELOG.md`. The 0.1.0 entry is intentionally labeled
 `Initial Release`, and later releases can add version-specific notes under the matching heading.

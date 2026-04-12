@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -56,3 +57,26 @@ jobs:
 
       - name: Run eBPF helper tests
         run: cargo test -p tracepoint-demo-ebpf --lib
+
+  dispatch-release:
+    name: Dispatch Release
+    needs: ci
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.ci.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch release workflow for semver tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Skipping release dispatch for non-release tag: $TAG"
+            exit 0
+          fi
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping dispatch."
+            exit 0
+          fi
+
+          gh workflow run release.yml --ref "$TAG" -f tag="$TAG"
