@@ -53,8 +53,8 @@ Startup behavior:
 - Systemd units wait until they are active.
 - `--all-systemd-processes` and `--all-container-processes` seed the runtime target's current PID
   list at startup, and the startup banner folds those resolved PIDs into the main `PIDs:` list.
-- Runtime target entries in that `PIDs:` list mark the main process as `main=...` and list
-  additional seeded processes as `pid=...`.
+- Runtime target entries in that `PIDs:` list are grouped per target, with `main=...` followed by
+  any additional seeded processes in the same entry.
 - Container and systemd targets refresh their main PID while the daemon is running.
 - Container and systemd targets print runtime state-change notices, including resolved replacement
   PIDs after restarts or recreation.

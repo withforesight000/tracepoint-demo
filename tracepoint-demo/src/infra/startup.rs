@@ -136,27 +136,33 @@ impl<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> StartupPrepar
     }
 }
 
-fn format_runtime_pid_labels(
+fn format_runtime_pid_label(
     scope: &str,
     name: &str,
     current_pid: Option<u32>,
     seeded_pids: &[u32],
-) -> Vec<String> {
-    let mut labels = Vec::new();
+) -> Option<String> {
     let mut pids = seeded_pids.to_vec();
     pids.sort_unstable();
     pids.dedup();
 
+    let mut parts = Vec::new();
+
     if let Some(pid) = current_pid {
-        labels.push(format!("{scope}:{name}:main={pid}"));
+        parts.push(format!("main={pid}"));
         pids.retain(|candidate| *candidate != pid);
     }
 
-    labels.extend(
-        pids.into_iter()
-            .map(|pid| format!("{scope}:{name}:pid={pid}")),
-    );
-    labels
+    if let Some((first, rest)) = pids.split_first() {
+        parts.push(format!("pid={first}"));
+        parts.extend(rest.iter().map(u32::to_string));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("{scope}:{name}:({})", parts.join(", ")))
+    }
 }
 
 pub fn collect_startup_watch_pid_labels(
@@ -173,21 +179,25 @@ pub fn collect_startup_watch_pid_labels(
         .collect::<Vec<_>>();
 
     for runtime in container_runtimes {
-        pid_labels.extend(format_runtime_pid_labels(
+        if let Some(label) = format_runtime_pid_label(
             "container",
             &runtime.name_or_id,
             runtime.current_pid,
             &runtime.seeded_pids,
-        ));
+        ) {
+            pid_labels.push(label);
+        }
     }
 
     for runtime in systemd_runtimes {
-        pid_labels.extend(format_runtime_pid_labels(
+        if let Some(label) = format_runtime_pid_label(
             "systemd",
             &runtime.unit_name,
             runtime.current_pid,
             &runtime.seeded_pids,
-        ));
+        ) {
+            pid_labels.push(label);
+        }
     }
 
     pid_labels
@@ -434,10 +444,8 @@ mod tests {
             labels,
             vec![
                 "pid=7".to_string(),
-                "container:ctr:main=10".to_string(),
-                "container:ctr:pid=40".to_string(),
-                "systemd:svc:main=20".to_string(),
-                "systemd:svc:pid=21".to_string(),
+                "container:ctr:(main=10, pid=40)".to_string(),
+                "systemd:svc:(main=20, pid=21)".to_string(),
             ]
         );
     }
