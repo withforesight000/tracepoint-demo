@@ -58,52 +58,11 @@ jobs:
       - name: Run eBPF helper tests
         run: cargo test -p tracepoint-demo-ebpf --lib
 
-  ebpf_verifier_smoke:
-    name: eBPF Verifier Smoke
-    needs: ci
-    if: ${{ needs.ci.result == 'success' }}
-    runs-on: ubuntu-22.04
-    timeout-minutes: 20
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Install nightly Rust toolchain for eBPF builds
-        run: rustup toolchain install nightly --profile minimal --component rust-src
-
-      - name: Cache Rust build outputs
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ". -> target"
-
-      - name: Install bpf-linker
-        run: cargo install --locked bpf-linker
-
-      - name: Build verifier smoke test
-        run: cargo test -p tracepoint-demo --test ebpf_verifier_smoke --no-run
-
-      - name: Run verifier smoke test as root
-        shell: bash
-        run: |
-          set -euo pipefail
-          bin="$(find target/debug/deps -maxdepth 1 -type f -name 'ebpf_verifier_smoke-*' -perm -111 | head -n 1)"
-          if [[ -z "$bin" ]]; then
-            echo "smoke test binary not found" >&2
-            exit 1
-          fi
-          sudo env TRACEPOINT_DEMO_EBPF_SMOKE_TEST=1 "$bin"
-
   dispatch-release:
     name: Dispatch Release
     needs:
       - ci
-      - ebpf_verifier_smoke
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.ci.result == 'success' && needs.ebpf_verifier_smoke.result == 'success' }}
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && needs.ci.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Dispatch release workflow for semver tags

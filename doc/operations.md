@@ -95,8 +95,7 @@ TRACEPOINT_DEMO_EBPF_SMOKE_TEST=1 sudo cargo test -p tracepoint-demo --test ebpf
 This exercises the real `program.load()` path, so any verifier rejection will surface there rather
 than only at daemon startup.
 
-GitHub Actions also runs the same smoke test before it dispatches tag-driven releases, so a
-verifier regression blocks the release workflow as well.
+This is a manual check and is not part of GitHub Actions CI.
 
 ## Regenerating BTF bindings
 

@@ -67,8 +67,7 @@ TRACEPOINT_DEMO_EBPF_SMOKE_TEST=1 sudo cargo test -p tracepoint-demo --test ebpf
 That test loads the embedded eBPF object against the current kernel, so it will fail with the
 verifier log if the program stops loading on that host.
 
-The GitHub Actions CI workflow also runs that smoke test before it dispatches tagged releases, so
-verifier regressions block both normal CI and release publication.
+This is a manual check and is not part of GitHub Actions CI.
 
 ## License
 
