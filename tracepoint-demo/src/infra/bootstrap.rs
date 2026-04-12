@@ -54,10 +54,10 @@ pub async fn run() -> anyhow::Result<()> {
         &mut prepared.state,
         &mut update_rx,
         runtime_loop::RuntimeLoopConfig {
-            startup_watch_pid_labels: &prepared.startup_watch_pid_labels,
-            tty_inputs: &prepared.tty_inputs,
+            startup_watch_pid_groups: &prepared.startup_watch_pid_groups,
             watch_children: prepared.watch_children,
-            target_descriptions: &prepared.target_descriptions,
+            all_container_processes: prepared.all_container_processes,
+            all_systemd_processes: prepared.all_systemd_processes,
             has_monitors,
         },
     )

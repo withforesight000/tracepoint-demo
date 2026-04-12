@@ -54,9 +54,14 @@ Startup behavior:
 - Systemd units do not block startup; the daemon starts monitoring immediately and picks up
   `MainPID` transitions even before the unit reports `active`.
 - `--all-systemd-processes` and `--all-container-processes` seed the runtime target's current PID
-  list at startup, and the startup banner folds those resolved PIDs into the main `PIDs:` list.
-- Runtime target entries in that `PIDs:` list are grouped per target, with `main=...` followed by
-  any additional seeded processes as `pid=...` entries in the same line.
+  list at startup, and the startup banner folds those resolved PIDs into the main grouped
+  `PIDs:` list.
+- Startup banner segments are grouped by source. Explicit `--pid` and positional PID inputs appear
+  as `pid:(pid=1111, 2222)`, TTY roots appear as `tty:/dev/pts/3:(pid=3333, 3334)`, and runtime
+  targets keep their source labels such as `container:my-service:(main=1234)` or
+  `systemd:sshd.service:(main=5678, pid=6789)`.
+- `--all-container-processes` and `--all-systemd-processes` appear in the banner suffix as
+  `(all-container-processes=on)` and `(all-systemd-processes=on)` when enabled.
 - Container and systemd targets refresh their main PID while the daemon is running.
 - Container and systemd targets print runtime state-change notices, including resolved replacement
   PIDs after restarts or recreation.

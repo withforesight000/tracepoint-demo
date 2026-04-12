@@ -10,7 +10,7 @@ use crate::{
         orchestration::{
             startup_prepare::{StartupPrepareBackend, StartupPrepareInputs, prepare_runtime_plan},
             startup_runtime,
-            state::{AppState, PreparedApp},
+            state::{AppState, PreparedApp, StartupWatchPidGroup},
             tty::normalize_tty_name,
             watch_roots::collect_watch_roots,
         },
@@ -19,8 +19,8 @@ use crate::{
             watch_systemd_unit::SystemdRuntime,
         },
         port::{
-            SharedCgroupPort, SharedContainerRuntimePort, SharedSystemdRuntimePort, StatusReporter,
-            WaitPort,
+            ProcessSeedPort, SharedCgroupPort, SharedContainerRuntimePort,
+            SharedSystemdRuntimePort, StatusReporter, WaitPort,
         },
     },
 };
@@ -119,122 +119,81 @@ impl<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> StartupPrepar
     ) -> StdHashMap<u32, u32> {
         collect_watch_roots(static_watch_roots, container_runtimes, systemd_runtimes)
     }
-
-    fn collect_target_descriptions(
-        &self,
-        container_runtimes: &[Self::ContainerRuntime],
-        systemd_runtimes: &[Self::SystemdRuntime],
-        all_container_processes: bool,
-        all_systemd_processes: bool,
-    ) -> Vec<String> {
-        collect_target_descriptions(
-            container_runtimes,
-            systemd_runtimes,
-            all_container_processes,
-            all_systemd_processes,
-        )
-    }
 }
 
-fn format_runtime_pid_label(
-    scope: &str,
-    name: &str,
-    current_pid: Option<u32>,
-    seeded_pids: &[u32],
-) -> Option<String> {
-    let mut pids = seeded_pids.to_vec();
+fn normalize_sorted_unique_pids(mut pids: Vec<u32>) -> Vec<u32> {
     pids.sort_unstable();
     pids.dedup();
-
-    let mut parts = Vec::new();
-
-    if let Some(pid) = current_pid {
-        parts.push(format!("main={pid}"));
-        pids.retain(|candidate| *candidate != pid);
-    }
-
-    if let Some((first, rest)) = pids.split_first() {
-        parts.push(format!("pid={first}"));
-        parts.extend(rest.iter().map(|pid| format!("pid={pid}")));
-    }
-
-    if parts.is_empty() {
-        None
-    } else {
-        Some(format!("{scope}:{name}:({})", parts.join(", ")))
-    }
+    pids
 }
 
-pub fn collect_startup_watch_pid_labels(
-    static_watch_roots: &StdHashMap<u32, u32>,
+fn collect_tty_watch_pid_groups(
+    process_seed: &mut dyn ProcessSeedPort,
+    tty_inputs: &[String],
+    watch_flags: u32,
+) -> anyhow::Result<Vec<StartupWatchPidGroup>> {
+    let mut tty_groups = Vec::new();
+    let mut seen_tty_filters = HashSet::new();
+
+    for tty in tty_inputs {
+        let normalized = normalize_tty_name(tty);
+        if normalized.is_empty() || !seen_tty_filters.insert(normalized.clone()) {
+            continue;
+        }
+
+        let tty_filters = HashSet::from([normalized]);
+        let roots = process_seed.seed_from_task_iter(&[], &tty_filters, watch_flags)?;
+        if roots.is_empty() {
+            continue;
+        }
+
+        tty_groups.push(StartupWatchPidGroup::simple(
+            format!("tty:{tty}"),
+            normalize_sorted_unique_pids(roots),
+        ));
+    }
+
+    Ok(tty_groups)
+}
+
+pub fn collect_startup_watch_pid_groups(
+    pids: &[u32],
+    tty_groups: &[StartupWatchPidGroup],
     container_runtimes: &[ContainerRuntime],
     systemd_runtimes: &[SystemdRuntime],
-) -> Vec<String> {
-    let mut static_root_pids = static_watch_roots.keys().copied().collect::<Vec<_>>();
-    static_root_pids.sort_unstable();
+) -> Vec<StartupWatchPidGroup> {
+    let mut groups = Vec::new();
 
-    let mut pid_labels = static_root_pids
-        .into_iter()
-        .map(|pid| format!("pid={pid}"))
-        .collect::<Vec<_>>();
+    if !pids.is_empty() {
+        groups.push(StartupWatchPidGroup::simple(
+            "pid",
+            normalize_sorted_unique_pids(pids.to_vec()),
+        ));
+    }
+
+    groups.extend(tty_groups.iter().cloned());
 
     for runtime in container_runtimes {
-        if let Some(label) = format_runtime_pid_label(
-            "container",
-            &runtime.name_or_id,
-            runtime.current_pid,
-            &runtime.seeded_pids,
-        ) {
-            pid_labels.push(label);
+        if runtime.current_pid.is_some() || !runtime.seeded_pids.is_empty() {
+            groups.push(StartupWatchPidGroup::runtime(
+                format!("container:{}", runtime.name_or_id),
+                runtime.current_pid,
+                runtime.seeded_pids.clone(),
+            ));
         }
     }
 
     for runtime in systemd_runtimes {
-        if let Some(label) = format_runtime_pid_label(
-            "systemd",
-            &runtime.unit_name,
-            runtime.current_pid,
-            &runtime.seeded_pids,
-        ) {
-            pid_labels.push(label);
+        if runtime.current_pid.is_some() || !runtime.seeded_pids.is_empty() {
+            groups.push(StartupWatchPidGroup::runtime(
+                format!("systemd:{}", runtime.unit_name),
+                runtime.current_pid,
+                runtime.seeded_pids.clone(),
+            ));
         }
     }
 
-    pid_labels
-}
-
-pub fn collect_target_descriptions(
-    container_runtimes: &[ContainerRuntime],
-    systemd_runtimes: &[SystemdRuntime],
-    all_container_processes: bool,
-    all_systemd_processes: bool,
-) -> Vec<String> {
-    let mut target_descriptions = Vec::new();
-    if !container_runtimes.is_empty() {
-        let container_list = container_runtimes
-            .iter()
-            .map(|runtime| runtime.name_or_id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        if all_container_processes {
-            target_descriptions.push(format!("containers=[{}] seed=all-procs", container_list));
-        } else {
-            target_descriptions.push(format!("containers=[{}]", container_list));
-        }
-    }
-    if !systemd_runtimes.is_empty() {
-        let unit_list = systemd_runtimes
-            .iter()
-            .map(|runtime| runtime.unit_name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        if all_systemd_processes {
-            target_descriptions.push(format!("systemd-units=[{}] seed=all-procs", unit_list));
-        } else {
-            target_descriptions.push(format!("systemd-units=[{}]", unit_list));
-        }
-    }
-    target_descriptions
+    groups
 }
 
 pub async fn prepare_prepared_app<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized>(
@@ -302,8 +261,13 @@ pub async fn prepare_prepared_app<TReporter: StatusReporter + ?Sized, TWait: Wai
         },
     )
     .await?;
-    let startup_watch_pid_labels = collect_startup_watch_pid_labels(
-        &plan.static_watch_roots,
+    let tty_watch_pid_groups = {
+        let mut process_seed = EbpfProcessSeedPort::new(&mut ebpf);
+        collect_tty_watch_pid_groups(&mut process_seed, &tty_inputs, watch_flags)?
+    };
+    let startup_watch_pid_groups = collect_startup_watch_pid_groups(
+        &pids,
+        &tty_watch_pid_groups,
         &plan.container_runtimes,
         &plan.systemd_runtimes,
     );
@@ -321,10 +285,10 @@ pub async fn prepare_prepared_app<TReporter: StatusReporter + ?Sized, TWait: Wai
     Ok(PreparedApp {
         ebpf,
         state,
-        startup_watch_pid_labels,
-        tty_inputs,
+        startup_watch_pid_groups,
         watch_children,
-        target_descriptions: plan.target_descriptions,
+        all_container_processes,
+        all_systemd_processes,
     })
 }
 
@@ -336,87 +300,13 @@ mod tests {
     use crate::test_support::{NoopContainerRuntimePort, NoopSystemdRuntimePort};
 
     #[test]
-    fn collect_target_descriptions_empty_when_no_runtimes() {
-        let desc = collect_target_descriptions(&[], &[], false, false);
-        assert!(desc.is_empty());
-    }
-
-    #[test]
-    fn collect_target_descriptions_includes_container_and_systemd_entries() {
+    fn collect_startup_watch_pid_groups_orders_pid_tty_container_and_systemd_segments() {
         let container = ContainerRuntime {
             cgroup_port: Arc::new(crate::gateway::procfs::ProcfsCgroupPort),
             runtime: Arc::new(NoopContainerRuntimePort),
             name_or_id: "ctr".to_string(),
             watch_children: false,
             all_processes: false,
-            flags: 1,
-            seeded_pids: vec![1],
-            current_pid: Some(1),
-        };
-        let systemd_runtime = SystemdRuntime {
-            runtime: Arc::new(NoopSystemdRuntimePort),
-            unit_name: "svc".to_string(),
-            watch_children: false,
-            all_processes: false,
-            seeded_pids: Vec::new(),
-            flags: 2,
-            current_pid: Some(2),
-            current_running: true,
-            current_active_state: Some("active".to_string()),
-            current_sub_state: Some("running".to_string()),
-        };
-
-        let desc = collect_target_descriptions(&[container], &[systemd_runtime], false, false);
-        assert!(desc.iter().any(|s| s.contains("containers")));
-        assert!(desc.iter().any(|s| s.contains("systemd-units")));
-    }
-
-    #[test]
-    fn collect_target_descriptions_marks_all_container_processes() {
-        let container = ContainerRuntime {
-            cgroup_port: Arc::new(crate::gateway::procfs::ProcfsCgroupPort),
-            runtime: Arc::new(NoopContainerRuntimePort),
-            name_or_id: "ctr".to_string(),
-            watch_children: true,
-            all_processes: true,
-            flags: 1,
-            seeded_pids: vec![1, 3],
-            current_pid: Some(1),
-        };
-
-        let desc = collect_target_descriptions(&[container], &[], true, false);
-
-        assert_eq!(desc, vec!["containers=[ctr] seed=all-procs".to_string()]);
-    }
-
-    #[test]
-    fn collect_target_descriptions_marks_all_systemd_processes() {
-        let systemd_runtime = SystemdRuntime {
-            runtime: Arc::new(NoopSystemdRuntimePort),
-            unit_name: "svc".to_string(),
-            watch_children: false,
-            all_processes: true,
-            seeded_pids: vec![2, 3],
-            flags: 2,
-            current_pid: Some(2),
-            current_running: true,
-            current_active_state: Some("active".to_string()),
-            current_sub_state: Some("running".to_string()),
-        };
-
-        let desc = collect_target_descriptions(&[], &[systemd_runtime], false, true);
-
-        assert_eq!(desc, vec!["systemd-units=[svc] seed=all-procs".to_string()]);
-    }
-
-    #[test]
-    fn collect_startup_watch_pid_labels_marks_main_and_seeded_runtime_pids() {
-        let container = ContainerRuntime {
-            cgroup_port: Arc::new(crate::gateway::procfs::ProcfsCgroupPort),
-            runtime: Arc::new(NoopContainerRuntimePort),
-            name_or_id: "ctr".to_string(),
-            watch_children: true,
-            all_processes: true,
             flags: 1,
             seeded_pids: vec![40, 10, 10],
             current_pid: Some(10),
@@ -424,8 +314,8 @@ mod tests {
         let systemd_runtime = SystemdRuntime {
             runtime: Arc::new(NoopSystemdRuntimePort),
             unit_name: "svc".to_string(),
-            watch_children: true,
-            all_processes: true,
+            watch_children: false,
+            all_processes: false,
             seeded_pids: vec![21, 20],
             flags: 2,
             current_pid: Some(20),
@@ -433,25 +323,28 @@ mod tests {
             current_active_state: Some("active".to_string()),
             current_sub_state: Some("running".to_string()),
         };
+        let tty_group = StartupWatchPidGroup::simple("tty:/dev/pts/3", vec![33, 34]);
 
-        let labels = collect_startup_watch_pid_labels(
-            &StdHashMap::from([(7, 0x1)]),
+        let groups = collect_startup_watch_pid_groups(
+            &[7, 7],
+            &[tty_group],
             &[container],
             &[systemd_runtime],
         );
 
         assert_eq!(
-            labels,
+            groups,
             vec![
-                "pid=7".to_string(),
-                "container:ctr:(main=10, pid=40)".to_string(),
-                "systemd:svc:(main=20, pid=21)".to_string(),
+                StartupWatchPidGroup::simple("pid", vec![7]),
+                StartupWatchPidGroup::simple("tty:/dev/pts/3", vec![33, 34]),
+                StartupWatchPidGroup::runtime("container:ctr", Some(10), vec![40, 10, 10]),
+                StartupWatchPidGroup::runtime("systemd:svc", Some(20), vec![21, 20]),
             ]
         );
     }
 
     #[test]
-    fn collect_startup_watch_pid_labels_labels_all_seeded_runtime_pids() {
+    fn collect_startup_watch_pid_groups_skips_empty_runtime_groups() {
         let container = ContainerRuntime {
             cgroup_port: Arc::new(crate::gateway::procfs::ProcfsCgroupPort),
             runtime: Arc::new(NoopContainerRuntimePort),
@@ -459,15 +352,15 @@ mod tests {
             watch_children: true,
             all_processes: true,
             flags: 1,
-            seeded_pids: vec![10, 11, 12],
-            current_pid: Some(10),
+            seeded_pids: Vec::new(),
+            current_pid: None,
         };
         let systemd_runtime = SystemdRuntime {
             runtime: Arc::new(NoopSystemdRuntimePort),
             unit_name: "svc".to_string(),
             watch_children: true,
             all_processes: true,
-            seeded_pids: vec![20, 21, 22],
+            seeded_pids: Vec::new(),
             flags: 2,
             current_pid: None,
             current_running: true,
@@ -475,15 +368,8 @@ mod tests {
             current_sub_state: Some("running".to_string()),
         };
 
-        let labels =
-            collect_startup_watch_pid_labels(&StdHashMap::new(), &[container], &[systemd_runtime]);
+        let groups = collect_startup_watch_pid_groups(&[], &[], &[container], &[systemd_runtime]);
 
-        assert_eq!(
-            labels,
-            vec![
-                "container:ctr:(main=10, pid=11, pid=12)".to_string(),
-                "systemd:svc:(pid=20, pid=21, pid=22)".to_string(),
-            ]
-        );
+        assert!(groups.is_empty());
     }
 }

@@ -11,15 +11,18 @@ use crate::{
         print_shutdown_message, print_startup_notice,
     },
     infra::presentation::runtime_updates::handle_runtime_update_with_state,
-    usecase::{orchestration::state::AppState, port::RuntimeUpdate},
+    usecase::{
+        orchestration::state::{AppState, StartupWatchPidGroup},
+        port::RuntimeUpdate,
+    },
 };
 use tracepoint_demo_common::EXEC_EVENTS_MAP;
 
 pub struct RuntimeLoopConfig<'a> {
-    pub startup_watch_pid_labels: &'a [String],
-    pub tty_inputs: &'a [String],
+    pub startup_watch_pid_groups: &'a [StartupWatchPidGroup],
     pub watch_children: bool,
-    pub target_descriptions: &'a [String],
+    pub all_container_processes: bool,
+    pub all_systemd_processes: bool,
     pub has_monitors: bool,
 }
 
@@ -32,10 +35,10 @@ pub async fn run(
     let mut reporter = ConsoleStatusReporter;
 
     print_startup_notice(
-        config.startup_watch_pid_labels,
-        config.tty_inputs,
+        config.startup_watch_pid_groups,
         config.watch_children,
-        config.target_descriptions,
+        config.all_container_processes,
+        config.all_systemd_processes,
     );
 
     let mut async_ring = AsyncFd::new(RingBuf::try_from(

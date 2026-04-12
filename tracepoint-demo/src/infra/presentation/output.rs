@@ -1,49 +1,106 @@
 use tracepoint_demo_common::ExecEvent;
 
-use crate::{gateway::ebpf::cstr_from_u8_escaped, usecase::port::StatusReporter};
+use crate::{
+    gateway::ebpf::cstr_from_u8_escaped,
+    usecase::{orchestration::state::StartupWatchPidGroup, port::StatusReporter},
+};
+
+fn format_simple_pid_group(label: &str, pids: &[u32]) -> Option<String> {
+    let mut pids = pids.to_vec();
+    pids.sort_unstable();
+    pids.dedup();
+
+    let (first, rest) = pids.split_first()?;
+    let mut parts = vec![format!("pid={first}")];
+    parts.extend(rest.iter().map(|pid| pid.to_string()));
+
+    Some(format!("{label}:({})", parts.join(", ")))
+}
+
+fn format_runtime_pid_group(
+    label: &str,
+    current_pid: Option<u32>,
+    seeded_pids: &[u32],
+) -> Option<String> {
+    let mut pids = seeded_pids.to_vec();
+    pids.sort_unstable();
+    pids.dedup();
+
+    let mut parts = Vec::new();
+
+    if let Some(pid) = current_pid {
+        parts.push(format!("main={pid}"));
+        pids.retain(|candidate| *candidate != pid);
+    }
+
+    if let Some((first, rest)) = pids.split_first() {
+        parts.push(format!("pid={first}"));
+        parts.extend(rest.iter().map(|pid| format!("pid={pid}")));
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("{label}:({})", parts.join(", ")))
+    }
+}
+
+fn format_startup_watch_pid_group(group: &StartupWatchPidGroup) -> Option<String> {
+    match group {
+        StartupWatchPidGroup::Simple { label, pids } => format_simple_pid_group(label, pids),
+        StartupWatchPidGroup::Runtime {
+            label,
+            current_pid,
+            seeded_pids,
+        } => format_runtime_pid_group(label, *current_pid, seeded_pids),
+    }
+}
 
 fn startup_notice_message(
-    watched_root_pids: &[String],
-    tty_inputs: &[String],
+    watched_pid_groups: &[StartupWatchPidGroup],
     watch_children: bool,
-    target_descriptions: &[String],
+    all_container_processes: bool,
+    all_systemd_processes: bool,
 ) -> String {
     let child_status = if watch_children {
         "watch_children=on"
     } else {
         "watch_children=off"
     };
-    let target_suffix = if target_descriptions.is_empty() {
-        String::new()
-    } else {
-        format!(" {}", target_descriptions.join(" "))
-    };
-    let formatted_roots = format!("[{}]", watched_root_pids.join(", "));
-    let has_roots = !watched_root_pids.is_empty();
+    let mut suffixes = Vec::new();
+    if all_container_processes {
+        suffixes.push("(all-container-processes=on)".to_string());
+    }
+    if all_systemd_processes {
+        suffixes.push("(all-systemd-processes=on)".to_string());
+    }
 
-    if tty_inputs.is_empty() {
-        if has_roots {
-            format!(
-                "Watching execve syscalls for PIDs: {} ({}){} (Ctrl-C to exit)",
-                formatted_roots, child_status, target_suffix
-            )
+    let mut message = if watched_pid_groups.is_empty() {
+        format!("Watching execve syscalls ({})", child_status)
+    } else {
+        let formatted_groups = watched_pid_groups
+            .iter()
+            .filter_map(format_startup_watch_pid_group)
+            .collect::<Vec<_>>();
+
+        if formatted_groups.is_empty() {
+            format!("Watching execve syscalls ({})", child_status)
         } else {
             format!(
-                "Watching execve syscalls ({}){} (Ctrl-C to exit)",
-                child_status, target_suffix
+                "Watching execve syscalls for PIDs: [{}] ({})",
+                formatted_groups.join(", "),
+                child_status
             )
         }
-    } else if has_roots {
-        format!(
-            "Watching execve syscalls for PIDs: {} (TTY filters: {:?}) ({}){} (Ctrl-C to exit)",
-            formatted_roots, tty_inputs, child_status, target_suffix
-        )
-    } else {
-        format!(
-            "Watching execve syscalls (TTY filters: {:?}) ({}){} (Ctrl-C to exit)",
-            tty_inputs, child_status, target_suffix
-        )
+    };
+
+    for suffix in suffixes {
+        message.push(' ');
+        message.push_str(&suffix);
     }
+
+    message.push_str(" (Ctrl-C to exit)");
+    message
 }
 
 fn shutdown_message() -> &'static str {
@@ -93,18 +150,18 @@ impl StatusReporter for ConsoleStatusReporter {
 }
 
 pub fn print_startup_notice(
-    watched_root_pids: &[String],
-    tty_inputs: &[String],
+    watched_pid_groups: &[StartupWatchPidGroup],
     watch_children: bool,
-    target_descriptions: &[String],
+    all_container_processes: bool,
+    all_systemd_processes: bool,
 ) {
     println!(
         "{}",
         startup_notice_message(
-            watched_root_pids,
-            tty_inputs,
+            watched_pid_groups,
             watch_children,
-            target_descriptions,
+            all_container_processes,
+            all_systemd_processes,
         )
     );
 }
@@ -126,26 +183,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn startup_notice_message_with_roots_and_targets() {
+    fn startup_notice_message_with_pid_group() {
         let message = startup_notice_message(
-            &["1".to_string(), "2".to_string(), "3".to_string()],
-            &[],
+            &[StartupWatchPidGroup::simple("pid", vec![1111, 2222])],
             true,
-            &[
-                "containers=[web]".to_string(),
-                "systemd-units=[sshd.service]".to_string(),
-            ],
+            false,
+            false,
         );
 
         assert_eq!(
             message,
-            "Watching execve syscalls for PIDs: [1, 2, 3] (watch_children=on) containers=[web] systemd-units=[sshd.service] (Ctrl-C to exit)"
+            "Watching execve syscalls for PIDs: [pid:(pid=1111, 2222)] (watch_children=on) (Ctrl-C to exit)"
         );
     }
 
     #[test]
-    fn startup_notice_message_without_roots_or_targets() {
-        let message = startup_notice_message(&[], &[], false, &[]);
+    fn startup_notice_message_without_groups_or_flags() {
+        let message = startup_notice_message(&[], false, false, false);
 
         assert_eq!(
             message,
@@ -154,50 +208,64 @@ mod tests {
     }
 
     #[test]
-    fn startup_notice_message_with_tty_and_roots() {
+    fn startup_notice_message_with_tty_container_and_systemd_groups() {
         let message = startup_notice_message(
-            &["pid=4".to_string()],
-            &["tty1".to_string(), "pts2".to_string()],
-            true,
-            &["tty=tty1".to_string()],
-        );
-
-        assert_eq!(
-            message,
-            "Watching execve syscalls for PIDs: [pid=4] (TTY filters: [\"tty1\", \"pts2\"]) (watch_children=on) tty=tty1 (Ctrl-C to exit)"
-        );
-    }
-
-    #[test]
-    fn startup_notice_message_with_tty_without_roots() {
-        let message = startup_notice_message(
-            &[],
-            &["pts1".to_string()],
-            false,
-            &["containers=[web]".to_string()],
-        );
-
-        assert_eq!(
-            message,
-            "Watching execve syscalls (TTY filters: [\"pts1\"]) (watch_children=off) containers=[web] (Ctrl-C to exit)"
-        );
-    }
-
-    #[test]
-    fn startup_notice_message_with_targets_and_no_roots() {
-        let message = startup_notice_message(
-            &[],
-            &[],
-            true,
             &[
-                "containers=[web]".to_string(),
-                "systemd-units=[svc]".to_string(),
+                StartupWatchPidGroup::simple("tty:/dev/pts/3", vec![527_814, 527_818]),
+                StartupWatchPidGroup::runtime(
+                    "container:mystifying_chatterjee",
+                    Some(546_054),
+                    vec![],
+                ),
+                StartupWatchPidGroup::runtime(
+                    "systemd:libvirtd.service",
+                    Some(565_043),
+                    vec![1_138, 1_139],
+                ),
             ],
+            true,
+            true,
+            true,
         );
 
         assert_eq!(
             message,
-            "Watching execve syscalls (watch_children=on) containers=[web] systemd-units=[svc] (Ctrl-C to exit)"
+            "Watching execve syscalls for PIDs: [tty:/dev/pts/3:(pid=527814, 527818), container:mystifying_chatterjee:(main=546054), systemd:libvirtd.service:(main=565043, pid=1138, pid=1139)] (watch_children=on) (all-container-processes=on) (all-systemd-processes=on) (Ctrl-C to exit)"
+        );
+    }
+
+    #[test]
+    fn startup_notice_message_with_pid_tty_container_and_systemd_groups() {
+        let message = startup_notice_message(
+            &[
+                StartupWatchPidGroup::simple("pid", vec![1111]),
+                StartupWatchPidGroup::simple("tty:/dev/pts/3", vec![3333, 3334]),
+                StartupWatchPidGroup::runtime("container:web", Some(4444), vec![]),
+                StartupWatchPidGroup::runtime("systemd:sshd.service", Some(5555), vec![]),
+            ],
+            false,
+            true,
+            false,
+        );
+
+        assert_eq!(
+            message,
+            "Watching execve syscalls for PIDs: [pid:(pid=1111), tty:/dev/pts/3:(pid=3333, 3334), container:web:(main=4444), systemd:sshd.service:(main=5555)] (watch_children=off) (all-container-processes=on) (Ctrl-C to exit)"
+        );
+    }
+
+    #[test]
+    fn startup_notice_message_with_pid_only_and_no_suffixes() {
+        let message = startup_notice_message(
+            &[StartupWatchPidGroup::simple("pid", vec![1])],
+            false,
+            false,
+            false,
+        );
+
+        assert_eq!(
+            message,
+            "Watching execve syscalls for PIDs: [pid:(pid=1)] (watch_children=off) (Ctrl-C to exit)"
         );
     }
 
@@ -261,10 +329,10 @@ mod tests {
     #[test]
     fn print_functions_delegate_to_message_helpers() {
         print_startup_notice(
-            &["pid=7".to_string()],
-            &["pts7".to_string()],
+            &[StartupWatchPidGroup::simple("pid", vec![7])],
             true,
-            &["containers=[api]".to_string()],
+            false,
+            true,
         );
         print_shutdown_message();
         print_exec_event(&ExecEvent {

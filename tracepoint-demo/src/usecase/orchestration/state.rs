@@ -8,6 +8,40 @@ use crate::{
     usecase::policy::watch_systemd_unit::SystemdRuntime,
 };
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartupWatchPidGroup {
+    Simple {
+        label: String,
+        pids: Vec<u32>,
+    },
+    Runtime {
+        label: String,
+        current_pid: Option<u32>,
+        seeded_pids: Vec<u32>,
+    },
+}
+
+impl StartupWatchPidGroup {
+    pub fn simple(label: impl Into<String>, pids: Vec<u32>) -> Self {
+        Self::Simple {
+            label: label.into(),
+            pids,
+        }
+    }
+
+    pub fn runtime(
+        label: impl Into<String>,
+        current_pid: Option<u32>,
+        seeded_pids: Vec<u32>,
+    ) -> Self {
+        Self::Runtime {
+            label: label.into(),
+            current_pid,
+            seeded_pids,
+        }
+    }
+}
+
 pub struct AppState {
     pub static_watch_roots: StdHashMap<u32, u32>,
     pub current_watch_roots: StdHashMap<u32, u32>,
@@ -19,8 +53,8 @@ pub struct AppState {
 pub struct PreparedApp {
     pub ebpf: Ebpf,
     pub state: AppState,
-    pub startup_watch_pid_labels: Vec<String>,
-    pub tty_inputs: Vec<String>,
+    pub startup_watch_pid_groups: Vec<StartupWatchPidGroup>,
     pub watch_children: bool,
-    pub target_descriptions: Vec<String>,
+    pub all_container_processes: bool,
+    pub all_systemd_processes: bool,
 }

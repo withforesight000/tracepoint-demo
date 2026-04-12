@@ -6,7 +6,6 @@ pub struct StartupRuntimePlan<TContainerRuntime, TSystemdRuntime> {
     pub current_watch_roots: StdHashMap<u32, u32>,
     pub container_runtimes: Vec<TContainerRuntime>,
     pub systemd_runtimes: Vec<TSystemdRuntime>,
-    pub target_descriptions: Vec<String>,
 }
 
 pub struct StartupPrepareInputs<'a> {
@@ -56,14 +55,6 @@ pub trait StartupPrepareBackend {
         container_runtimes: &[Self::ContainerRuntime],
         systemd_runtimes: &[Self::SystemdRuntime],
     ) -> StdHashMap<u32, u32>;
-
-    fn collect_target_descriptions(
-        &self,
-        container_runtimes: &[Self::ContainerRuntime],
-        systemd_runtimes: &[Self::SystemdRuntime],
-        all_container_processes: bool,
-        all_systemd_processes: bool,
-    ) -> Vec<String>;
 }
 
 pub async fn prepare_runtime_plan<TBackend: StartupPrepareBackend>(
@@ -112,19 +103,12 @@ pub async fn prepare_runtime_plan<TBackend: StartupPrepareBackend>(
 
     let current_watch_roots =
         backend.collect_watch_roots(&static_watch_roots, &container_runtimes, &systemd_runtimes);
-    let target_descriptions = backend.collect_target_descriptions(
-        &container_runtimes,
-        &systemd_runtimes,
-        inputs.all_container_processes,
-        inputs.all_systemd_processes,
-    );
 
     Ok(StartupRuntimePlan {
         static_watch_roots,
         current_watch_roots,
         container_runtimes,
         systemd_runtimes,
-        target_descriptions,
     })
 }
 
@@ -144,7 +128,6 @@ mod tests {
         current_watch_roots: StdHashMap<u32, u32>,
         container_runtimes: Vec<FakeContainerRuntime>,
         systemd_runtimes: Vec<FakeSystemdRuntime>,
-        target_descriptions: Vec<String>,
         observed_has_runtime_targets: Vec<bool>,
         container_init_calls: usize,
         systemd_init_calls: usize,
@@ -193,16 +176,6 @@ mod tests {
             _systemd_runtimes: &[Self::SystemdRuntime],
         ) -> StdHashMap<u32, u32> {
             self.current_watch_roots.clone()
-        }
-
-        fn collect_target_descriptions(
-            &self,
-            _container_runtimes: &[Self::ContainerRuntime],
-            _systemd_runtimes: &[Self::SystemdRuntime],
-            _all_container_processes: bool,
-            _all_systemd_processes: bool,
-        ) -> Vec<String> {
-            self.target_descriptions.clone()
         }
     }
 
@@ -300,10 +273,6 @@ mod tests {
             current_watch_roots: StdHashMap::from([(10, 0x1), (20, 0x2), (30, 0x4)]),
             container_runtimes: vec![FakeContainerRuntime("web")],
             systemd_runtimes: vec![FakeSystemdRuntime("sshd.service")],
-            target_descriptions: vec![
-                "containers=[web]".to_string(),
-                "systemd-units=[sshd.service]".to_string(),
-            ],
             ..Default::default()
         };
 
@@ -337,13 +306,6 @@ mod tests {
         assert_eq!(
             plan.current_watch_roots,
             StdHashMap::from([(10, 0x1), (20, 0x2), (30, 0x4)])
-        );
-        assert_eq!(
-            plan.target_descriptions,
-            vec![
-                "containers=[web]".to_string(),
-                "systemd-units=[sshd.service]".to_string(),
-            ]
         );
     }
 }

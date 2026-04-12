@@ -196,8 +196,9 @@ Some terms appear repeatedly in the code and are easy to confuse on a first read
 - runtime update: a userspace message saying that container or systemd state changed
 - runtime updates also drive user-visible transition notices so restarts, recreation, and new
   replacement PIDs are visible without enabling debug logging
-- startup PID banners group runtime-derived PIDs per target so a container or systemd unit appears
-  as a single entry with `main=...` and any extra seeded PIDs shown as `pid=...`
+- startup PID banners group roots by source so explicit PID inputs appear as `pid:(pid=...)`,
+  TTY roots appear as `tty:/dev/pts/3:(pid=...)`, and runtime-derived targets stay grouped per
+  target with `main=...` plus any extra seeded PIDs shown as `pid=...`
 
 ## Why this split exists
 
@@ -235,10 +236,12 @@ seen during some restarts, userspace seeds that PID immediately so the unit's ea
 `execve` activity is not missed.
 
 When `--all-systemd-processes` or `--all-container-processes` is enabled, the startup banner folds
-the resolved seed set into the main `PIDs:` list instead of appending a separate `pids=[...]`
-suffix. Runtime targets mark the main process as `main=...` and list additional seeded processes
-as `pid=...`, so the banner shows the distinguished main PID and the rest of the watched seed set
-in one place without repeating equivalent namespace information.
+the resolved seed set into the main grouped `PIDs:` list instead of appending a separate
+`pids=[...]` suffix. Explicit PID inputs appear as `pid:(pid=...)`, TTY-derived roots appear as
+`tty:/dev/pts/3:(pid=...)`, and runtime targets keep their source labels while marking the main
+process as `main=...` and additional seeded processes as `pid=...`. The banner also shows
+`(all-container-processes=on)` and `(all-systemd-processes=on)` explicitly when those modes are
+enabled, so the source grouping and the runtime seeding flags stay visible in the same line.
 
 This tracer still only sees `execve` syscalls. Shell builtins like `cd`, `pwd`, and `echo` do not
 produce output; external commands launched from an interactive shell do.

@@ -5,9 +5,10 @@ use std::{collections::HashMap, sync::Arc};
 use tracepoint_demo::integration::{
     ContainerRuntime, RuntimeUpdate, RuntimeUpdateHandler, SharedCgroupPort,
     SharedContainerRuntimePort, SharedSystemdRuntimePort, StartupPrepareBackend,
-    StartupPrepareInputs, SystemdRuntime, SystemdUnitRuntimeStatus, collect_target_descriptions,
-    collect_watch_roots, handle_runtime_update, initialize_container_runtimes,
-    initialize_systemd_runtimes, prepare_runtime_plan, sync_watch_pids,
+    StartupPrepareInputs, StartupWatchPidGroup, SystemdRuntime, SystemdUnitRuntimeStatus,
+    collect_startup_watch_pid_groups, collect_watch_roots, handle_runtime_update,
+    initialize_container_runtimes, initialize_systemd_runtimes, prepare_runtime_plan,
+    sync_watch_pids,
 };
 use tracepoint_demo_common::{PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF};
 
@@ -24,6 +25,52 @@ fn watch_flags(watch_children: bool) -> u32 {
         } else {
             0
         }
+}
+
+#[test]
+fn collect_startup_watch_pid_groups_orders_pid_tty_container_and_systemd_segments() {
+    let container = ContainerRuntime {
+        cgroup_port: Arc::new(ScriptedCgroupPort::default()),
+        runtime: Arc::new(ScriptedContainerRuntimePort::default()),
+        name_or_id: "web".to_string(),
+        watch_children: true,
+        all_processes: true,
+        flags: watch_flags(true),
+        seeded_pids: vec![4444],
+        current_pid: Some(4444),
+    };
+    let systemd_runtime = SystemdRuntime {
+        runtime: Arc::new(ScriptedSystemdRuntimePort::default()),
+        unit_name: "sshd.service".to_string(),
+        watch_children: true,
+        all_processes: false,
+        seeded_pids: Vec::new(),
+        flags: watch_flags(true),
+        current_pid: Some(5555),
+        current_running: true,
+        current_active_state: Some("active".to_string()),
+        current_sub_state: Some("running".to_string()),
+    };
+
+    let groups = collect_startup_watch_pid_groups(
+        &[1111, 1111],
+        &[StartupWatchPidGroup::simple(
+            "tty:/dev/pts/3",
+            vec![3333, 3334],
+        )],
+        &[container],
+        &[systemd_runtime],
+    );
+
+    assert_eq!(
+        groups,
+        vec![
+            StartupWatchPidGroup::simple("pid", vec![1111]),
+            StartupWatchPidGroup::simple("tty:/dev/pts/3", vec![3333, 3334]),
+            StartupWatchPidGroup::runtime("container:web", Some(4444), vec![4444]),
+            StartupWatchPidGroup::runtime("systemd:sshd.service", Some(5555), Vec::new()),
+        ]
+    );
 }
 
 struct TestStartupBackend {
@@ -108,21 +155,6 @@ impl StartupPrepareBackend for TestStartupBackend {
         systemd_runtimes: &[Self::SystemdRuntime],
     ) -> HashMap<u32, u32> {
         collect_watch_roots(static_watch_roots, container_runtimes, systemd_runtimes)
-    }
-
-    fn collect_target_descriptions(
-        &self,
-        container_runtimes: &[Self::ContainerRuntime],
-        systemd_runtimes: &[Self::SystemdRuntime],
-        all_container_processes: bool,
-        all_systemd_processes: bool,
-    ) -> Vec<String> {
-        collect_target_descriptions(
-            container_runtimes,
-            systemd_runtimes,
-            all_container_processes,
-            all_systemd_processes,
-        )
     }
 }
 
@@ -265,7 +297,7 @@ async fn prepare_runtime_plan_retries_for_pid_targets_until_one_matches() {
 }
 
 #[tokio::test]
-async fn prepare_runtime_plan_initializes_runtime_targets_and_descriptions() {
+async fn prepare_runtime_plan_initializes_runtime_targets_and_roots() {
     let mut process_seed = RecordingProcessSeed::default();
     process_seed.push_task_iter_result(Ok(vec![11]));
     process_seed.push_direct_result(Ok(()));
@@ -330,13 +362,6 @@ async fn prepare_runtime_plan_initializes_runtime_targets_and_descriptions() {
     );
     assert_eq!(plan.container_runtimes.len(), 1);
     assert_eq!(plan.systemd_runtimes.len(), 1);
-    assert_eq!(
-        plan.target_descriptions,
-        vec![
-            "containers=[web] seed=all-procs".to_string(),
-            "systemd-units=[demo.service] seed=all-procs".to_string(),
-        ]
-    );
     assert_eq!(
         backend.process_seed.task_iter_calls,
         vec![support::SeedFromTaskIterCall {
@@ -461,10 +486,6 @@ async fn prepare_runtime_plan_seeds_systemd_main_pid_even_when_unit_is_inactive(
         HashMap::from([(91, watch_flags(false))])
     );
     assert_eq!(
-        plan.target_descriptions,
-        vec!["systemd-units=[demo.service]".to_string()]
-    );
-    assert_eq!(
         backend.process_seed.direct_calls,
         vec![support::SeedDirectCall {
             pids: vec![91],
@@ -524,10 +545,6 @@ async fn prepare_runtime_plan_keeps_active_exited_systemd_unit_without_seeding()
     assert_eq!(plan.systemd_runtimes[0].current_pid, None);
     assert!(plan.systemd_runtimes[0].current_running);
     assert!(plan.systemd_runtimes[0].seeded_pids.is_empty());
-    assert_eq!(
-        plan.target_descriptions,
-        vec!["systemd-units=[oneshot.service]".to_string()]
-    );
     assert!(backend.process_seed.task_iter_calls.is_empty());
     assert!(backend.process_seed.direct_calls.is_empty());
 }
@@ -586,10 +603,6 @@ async fn prepare_runtime_plan_seeds_all_systemd_processes_even_without_main_pid(
     assert!(plan.systemd_runtimes[0].watch_children);
     assert_eq!(plan.systemd_runtimes[0].seeded_pids, vec![31, 32]);
     assert!(plan.current_watch_roots.is_empty());
-    assert_eq!(
-        plan.target_descriptions,
-        vec!["systemd-units=[demo.service] seed=all-procs".to_string()]
-    );
     assert_eq!(
         backend.process_seed.direct_calls,
         vec![support::SeedDirectCall {
@@ -654,10 +667,6 @@ async fn prepare_runtime_plan_seeds_all_processes_for_active_exited_systemd_unit
     assert!(plan.systemd_runtimes[0].watch_children);
     assert_eq!(plan.systemd_runtimes[0].seeded_pids, vec![31, 32]);
     assert!(plan.current_watch_roots.is_empty());
-    assert_eq!(
-        plan.target_descriptions,
-        vec!["systemd-units=[demo.service] seed=all-procs".to_string()]
-    );
     assert_eq!(
         backend.process_seed.direct_calls,
         vec![support::SeedDirectCall {

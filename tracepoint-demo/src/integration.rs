@@ -3,7 +3,7 @@
 pub use crate::infra::presentation::runtime_update_dispatch::{
     RuntimeUpdateHandler, handle_runtime_update,
 };
-pub use crate::infra::startup::collect_target_descriptions;
+pub use crate::infra::startup::collect_startup_watch_pid_groups;
 pub use crate::usecase::orchestration::startup_prepare::{
     StartupPrepareBackend, StartupPrepareInputs, StartupRuntimePlan, prepare_runtime_plan,
 };
@@ -11,6 +11,7 @@ pub use crate::usecase::orchestration::startup_runtime::{
     StaticWatchRootsSpec, collect_static_watch_roots, initialize_container_runtimes,
     initialize_systemd_runtimes,
 };
+pub use crate::usecase::orchestration::state::StartupWatchPidGroup;
 pub use crate::usecase::orchestration::watch_roots::{
     WatchPidStore, collect_watch_roots, sync_watch_pids,
 };
