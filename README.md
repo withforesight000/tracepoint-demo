@@ -100,14 +100,14 @@ consistent across policy and orchestration tests.
 Static checks:
 
 ```bash
-cargo clippy -p tracepoint-demo -- -D warnings
+cargo clippy -- -D warnings
 cargo fmt --all -- --check
 ```
 
 Coverage (tarpaulin) focuses on userspace logic and skips eBPF/gateway integration boilerplate:
 
 ```bash
-cargo tarpaulin --skip-clean -p tracepoint-demo --lib \
+cargo tarpaulin --skip-clean --lib \
   --exclude-files tracepoint-demo-ebpf/src/vmlinux.rs --out Stdout
 ```
 

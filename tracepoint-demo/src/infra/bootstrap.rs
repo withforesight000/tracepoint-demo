@@ -53,11 +53,13 @@ pub async fn run() -> anyhow::Result<()> {
         &mut prepared.ebpf,
         &mut prepared.state,
         &mut update_rx,
-        &prepared.startup_watch_pid_labels,
-        &prepared.tty_inputs,
-        prepared.watch_children,
-        &prepared.target_descriptions,
-        has_monitors,
+        runtime_loop::RuntimeLoopConfig {
+            startup_watch_pid_labels: &prepared.startup_watch_pid_labels,
+            tty_inputs: &prepared.tty_inputs,
+            watch_children: prepared.watch_children,
+            target_descriptions: &prepared.target_descriptions,
+            has_monitors,
+        },
     )
     .await
 }

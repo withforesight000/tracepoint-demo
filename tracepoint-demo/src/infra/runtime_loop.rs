@@ -15,23 +15,27 @@ use crate::{
 };
 use tracepoint_demo_common::EXEC_EVENTS_MAP;
 
+pub struct RuntimeLoopConfig<'a> {
+    pub startup_watch_pid_labels: &'a [String],
+    pub tty_inputs: &'a [String],
+    pub watch_children: bool,
+    pub target_descriptions: &'a [String],
+    pub has_monitors: bool,
+}
+
 pub async fn run(
     ebpf: &mut Ebpf,
     state: &mut AppState,
     update_rx: &mut mpsc::UnboundedReceiver<RuntimeUpdate>,
-    startup_watch_pid_labels: &[String],
-    tty_inputs: &[String],
-    watch_children: bool,
-    target_descriptions: &[String],
-    has_monitors: bool,
+    config: RuntimeLoopConfig<'_>,
 ) -> anyhow::Result<()> {
     let mut reporter = ConsoleStatusReporter;
 
     print_startup_notice(
-        startup_watch_pid_labels,
-        tty_inputs,
-        watch_children,
-        target_descriptions,
+        config.startup_watch_pid_labels,
+        config.tty_inputs,
+        config.watch_children,
+        config.target_descriptions,
     );
 
     let mut async_ring = AsyncFd::new(RingBuf::try_from(
@@ -39,7 +43,7 @@ pub async fn run(
             .ok_or_else(|| anyhow::anyhow!("map not found"))?,
     )?)?;
 
-    if !has_monitors {
+    if !config.has_monitors {
         return run_plain_event_loop(&mut async_ring).await;
     }
 

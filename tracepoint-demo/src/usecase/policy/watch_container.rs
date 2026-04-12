@@ -92,7 +92,7 @@ pub(crate) async fn seed_container_processes<TReporter: StatusReporter + ?Sized>
         {
             Ok(pids) => {
                 process_seed.seed_direct(&pids, spec.flags)?;
-                return Ok(pids);
+                Ok(pids)
             }
             Err(err) => {
                 reporter.warn(format!(
@@ -100,21 +100,15 @@ pub(crate) async fn seed_container_processes<TReporter: StatusReporter + ?Sized>
                     spec.name_or_id, spec.main_pid, err
                 ));
                 let empty_tty_filters = HashSet::new();
-                return process_seed.seed_from_task_iter(
-                    &[spec.main_pid],
-                    &empty_tty_filters,
-                    spec.flags,
-                );
+                process_seed.seed_from_task_iter(&[spec.main_pid], &empty_tty_filters, spec.flags)
             }
         }
-    }
-
-    if spec.watch_children {
+    } else if spec.watch_children {
         let empty_tty_filters = HashSet::new();
-        return process_seed.seed_from_task_iter(&[spec.main_pid], &empty_tty_filters, spec.flags);
+        process_seed.seed_from_task_iter(&[spec.main_pid], &empty_tty_filters, spec.flags)
     } else {
         process_seed.seed_direct(&[spec.main_pid], spec.flags)?;
-        return Ok(vec![spec.main_pid]);
+        Ok(vec![spec.main_pid])
     }
 }
 

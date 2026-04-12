@@ -79,15 +79,16 @@ source via `aya-build` and `build-std`.
 Unit tests and lints:
 
 ```bash
-cargo test -p tracepoint-demo --lib
-cargo clippy -p tracepoint-demo -- -D warnings
+cargo test -p tracepoint-demo
+cargo test -p tracepoint-demo-ebpf --lib
+cargo clippy -- -D warnings
 cargo fmt --all -- --check
 ```
 
 Coverage:
 
 ```bash
-cargo tarpaulin --skip-clean -p tracepoint-demo --lib \
+cargo tarpaulin --skip-clean --lib \
   --exclude-files tracepoint-demo-ebpf/src/vmlinux.rs --out Stdout
 ```
 
