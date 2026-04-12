@@ -5,9 +5,9 @@ use std::{collections::HashMap, sync::Arc};
 use tracepoint_demo::integration::{
     ContainerRuntime, RuntimeUpdate, RuntimeUpdateHandler, SharedCgroupPort,
     SharedContainerRuntimePort, SharedSystemdRuntimePort, StartupPrepareBackend,
-    StartupPrepareInputs, SystemdRuntime, collect_target_descriptions, collect_watch_roots,
-    handle_runtime_update, initialize_container_runtimes, initialize_systemd_runtimes,
-    prepare_runtime_plan, sync_watch_pids,
+    StartupPrepareInputs, SystemdRuntime, SystemdUnitRuntimeStatus, collect_target_descriptions,
+    collect_watch_roots, handle_runtime_update, initialize_container_runtimes,
+    initialize_systemd_runtimes, prepare_runtime_plan, sync_watch_pids,
 };
 use tracepoint_demo_common::{PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF};
 
@@ -403,6 +403,201 @@ async fn prepare_runtime_plan_initializes_runtime_targets_and_descriptions() {
             .as_slice(),
         &["demo.service".to_string()]
     );
+}
+
+#[tokio::test]
+async fn prepare_runtime_plan_seeds_systemd_main_pid_even_when_unit_is_inactive() {
+    let mut process_seed = RecordingProcessSeed::default();
+    process_seed.push_direct_result(Ok(()));
+
+    let systemd_runtime = Arc::new(ScriptedSystemdRuntimePort::default());
+    systemd_runtime.push_current_status_result(Ok(SystemdUnitRuntimeStatus {
+        exists: true,
+        active_state: Some("inactive".to_string()),
+        sub_state: Some("dead".to_string()),
+        main_pid: Some(91),
+    }));
+
+    let mut backend = TestStartupBackend {
+        process_seed,
+        reporter: RecordingStatusReporter::default(),
+        wait_port: ScriptedWaitPort::default(),
+        cgroup_port: Arc::new(ScriptedCgroupPort::default()),
+        container_runtime: Arc::new(ScriptedContainerRuntimePort::default()),
+        systemd_runtime,
+    };
+
+    let pids: [u32; 0] = [];
+    let tty_filters = std::collections::HashSet::new();
+    let tty_inputs: Vec<String> = Vec::new();
+    let containers: Vec<String> = Vec::new();
+    let systemd_units = vec!["demo.service".to_string()];
+
+    let plan = prepare_runtime_plan(
+        &mut backend,
+        StartupPrepareInputs {
+            pids: &pids,
+            tty_inputs: &tty_inputs,
+            tty_filters: &tty_filters,
+            containers: &containers,
+            systemd_units: &systemd_units,
+            watch_children: false,
+            all_container_processes: false,
+            all_systemd_processes: false,
+            watch_flags: watch_flags(false),
+            container_runtime_available: false,
+            systemd_runtime_available: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(plan.systemd_runtimes.len(), 1);
+    assert_eq!(plan.systemd_runtimes[0].current_pid, Some(91));
+    assert!(!plan.systemd_runtimes[0].current_running);
+    assert_eq!(plan.systemd_runtimes[0].seeded_pids, vec![91]);
+    assert_eq!(
+        plan.current_watch_roots,
+        HashMap::from([(91, watch_flags(false))])
+    );
+    assert_eq!(
+        plan.target_descriptions,
+        vec!["systemd-units=[demo.service]".to_string()]
+    );
+    assert_eq!(
+        backend.process_seed.direct_calls,
+        vec![support::SeedDirectCall {
+            pids: vec![91],
+            flags: watch_flags(false),
+        }]
+    );
+    assert!(backend.process_seed.task_iter_calls.is_empty());
+}
+
+#[tokio::test]
+async fn prepare_runtime_plan_keeps_active_exited_systemd_unit_without_seeding() {
+    let process_seed = RecordingProcessSeed::default();
+
+    let systemd_runtime = Arc::new(ScriptedSystemdRuntimePort::default());
+    systemd_runtime.push_current_status_result(Ok(SystemdUnitRuntimeStatus {
+        exists: true,
+        active_state: Some("active".to_string()),
+        sub_state: Some("exited".to_string()),
+        main_pid: None,
+    }));
+
+    let mut backend = TestStartupBackend {
+        process_seed,
+        reporter: RecordingStatusReporter::default(),
+        wait_port: ScriptedWaitPort::default(),
+        cgroup_port: Arc::new(ScriptedCgroupPort::default()),
+        container_runtime: Arc::new(ScriptedContainerRuntimePort::default()),
+        systemd_runtime,
+    };
+
+    let pids: [u32; 0] = [];
+    let tty_filters = std::collections::HashSet::new();
+    let tty_inputs: Vec<String> = Vec::new();
+    let containers: Vec<String> = Vec::new();
+    let systemd_units = vec!["oneshot.service".to_string()];
+
+    let plan = prepare_runtime_plan(
+        &mut backend,
+        StartupPrepareInputs {
+            pids: &pids,
+            tty_inputs: &tty_inputs,
+            tty_filters: &tty_filters,
+            containers: &containers,
+            systemd_units: &systemd_units,
+            watch_children: false,
+            all_container_processes: false,
+            all_systemd_processes: false,
+            watch_flags: watch_flags(false),
+            container_runtime_available: false,
+            systemd_runtime_available: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(plan.systemd_runtimes.len(), 1);
+    assert_eq!(plan.systemd_runtimes[0].current_pid, None);
+    assert!(plan.systemd_runtimes[0].current_running);
+    assert!(plan.systemd_runtimes[0].seeded_pids.is_empty());
+    assert_eq!(
+        plan.target_descriptions,
+        vec!["systemd-units=[oneshot.service]".to_string()]
+    );
+    assert!(backend.process_seed.task_iter_calls.is_empty());
+    assert!(backend.process_seed.direct_calls.is_empty());
+}
+
+#[tokio::test]
+async fn prepare_runtime_plan_seeds_all_systemd_processes_even_without_main_pid() {
+    let mut process_seed = RecordingProcessSeed::default();
+    process_seed.push_direct_result(Ok(()));
+
+    let systemd_runtime = Arc::new(ScriptedSystemdRuntimePort::default());
+    systemd_runtime.push_current_status_result(Ok(SystemdUnitRuntimeStatus {
+        exists: true,
+        active_state: Some("active".to_string()),
+        sub_state: Some("running".to_string()),
+        main_pid: None,
+    }));
+    systemd_runtime.push_unit_pids_result(Ok(vec![31, 32]));
+
+    let mut backend = TestStartupBackend {
+        process_seed,
+        reporter: RecordingStatusReporter::default(),
+        wait_port: ScriptedWaitPort::default(),
+        cgroup_port: Arc::new(ScriptedCgroupPort::default()),
+        container_runtime: Arc::new(ScriptedContainerRuntimePort::default()),
+        systemd_runtime,
+    };
+
+    let pids: [u32; 0] = [];
+    let tty_filters = std::collections::HashSet::new();
+    let tty_inputs: Vec<String> = Vec::new();
+    let containers: Vec<String> = Vec::new();
+    let systemd_units = vec!["demo.service".to_string()];
+
+    let plan = prepare_runtime_plan(
+        &mut backend,
+        StartupPrepareInputs {
+            pids: &pids,
+            tty_inputs: &tty_inputs,
+            tty_filters: &tty_filters,
+            containers: &containers,
+            systemd_units: &systemd_units,
+            watch_children: false,
+            all_container_processes: false,
+            all_systemd_processes: true,
+            watch_flags: watch_flags(false),
+            container_runtime_available: false,
+            systemd_runtime_available: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(plan.systemd_runtimes.len(), 1);
+    assert_eq!(plan.systemd_runtimes[0].current_pid, None);
+    assert!(plan.systemd_runtimes[0].current_running);
+    assert!(plan.systemd_runtimes[0].watch_children);
+    assert_eq!(plan.systemd_runtimes[0].seeded_pids, vec![31, 32]);
+    assert!(plan.current_watch_roots.is_empty());
+    assert_eq!(
+        plan.target_descriptions,
+        vec!["systemd-units=[demo.service] seed=all-procs".to_string()]
+    );
+    assert_eq!(
+        backend.process_seed.direct_calls,
+        vec![support::SeedDirectCall {
+            pids: vec![31, 32],
+            flags: watch_flags(true),
+        }]
+    );
+    assert!(backend.process_seed.task_iter_calls.is_empty());
 }
 
 #[tokio::test]

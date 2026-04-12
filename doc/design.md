@@ -196,7 +196,7 @@ Some terms appear repeatedly in the code and are easy to confuse on a first read
 - runtime updates also drive user-visible transition notices so restarts, recreation, and new
   replacement PIDs are visible without enabling debug logging
 - startup PID banners group runtime-derived PIDs per target so a container or systemd unit appears
-  as a single entry with `main=...` and any extra seeded PIDs
+  as a single entry with `main=...` and any extra seeded PIDs shown as `pid=...`
 
 ## Why this split exists
 

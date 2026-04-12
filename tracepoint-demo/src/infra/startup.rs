@@ -155,7 +155,7 @@ fn format_runtime_pid_label(
 
     if let Some((first, rest)) = pids.split_first() {
         parts.push(format!("pid={first}"));
-        parts.extend(rest.iter().map(u32::to_string));
+        parts.extend(rest.iter().map(|pid| format!("pid={pid}")));
     }
 
     if parts.is_empty() {
@@ -446,6 +446,43 @@ mod tests {
                 "pid=7".to_string(),
                 "container:ctr:(main=10, pid=40)".to_string(),
                 "systemd:svc:(main=20, pid=21)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_startup_watch_pid_labels_labels_all_seeded_runtime_pids() {
+        let container = ContainerRuntime {
+            cgroup_port: Arc::new(crate::gateway::procfs::ProcfsCgroupPort),
+            runtime: Arc::new(NoopContainerRuntimePort),
+            name_or_id: "ctr".to_string(),
+            watch_children: true,
+            all_processes: true,
+            flags: 1,
+            seeded_pids: vec![10, 11, 12],
+            current_pid: Some(10),
+        };
+        let systemd_runtime = SystemdRuntime {
+            runtime: Arc::new(NoopSystemdRuntimePort),
+            unit_name: "svc".to_string(),
+            watch_children: true,
+            all_processes: true,
+            seeded_pids: vec![20, 21, 22],
+            flags: 2,
+            current_pid: None,
+            current_running: true,
+            current_active_state: Some("active".to_string()),
+            current_sub_state: Some("running".to_string()),
+        };
+
+        let labels =
+            collect_startup_watch_pid_labels(&StdHashMap::new(), &[container], &[systemd_runtime]);
+
+        assert_eq!(
+            labels,
+            vec![
+                "container:ctr:(main=10, pid=11, pid=12)".to_string(),
+                "systemd:svc:(pid=20, pid=21, pid=22)".to_string(),
             ]
         );
     }

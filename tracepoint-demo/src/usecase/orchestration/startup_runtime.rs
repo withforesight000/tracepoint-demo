@@ -374,6 +374,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn initialize_systemd_runtimes_treats_active_exited_unit_as_running() {
+        let mut process_seed = MockProcessSeedPort::new();
+        let runtime: SharedSystemdRuntimePort = Arc::new(QueuedSystemdRuntimePort::with_statuses(
+            vec![Ok(SystemdUnitRuntimeStatus {
+                exists: true,
+                active_state: Some("active".to_string()),
+                sub_state: Some("exited".to_string()),
+                main_pid: None,
+            })],
+        ));
+        let mut reporter = MockStatusReporter::new();
+        let mut wait_port = MockWaitPort::new();
+
+        let runtimes = initialize_systemd_runtimes(
+            &mut process_seed,
+            &mut reporter,
+            &mut wait_port,
+            &runtime,
+            &["oneshot.service".to_string()],
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(runtimes.len(), 1);
+        assert_eq!(runtimes[0].current_pid, None);
+        assert!(runtimes[0].current_running);
+        assert!(runtimes[0].seeded_pids.is_empty());
+    }
+
+    #[tokio::test]
     async fn initialize_systemd_runtimes_seeds_main_pid_even_before_running() {
         let mut process_seed = MockProcessSeedPort::new();
         process_seed

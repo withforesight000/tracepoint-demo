@@ -400,9 +400,15 @@ mod tests {
             sub_state: "reload".to_string(),
             main_pid: Some(2),
         };
+        let exited = SystemdUnitStatus {
+            active_state: "active".to_string(),
+            sub_state: "exited".to_string(),
+            main_pid: None,
+        };
 
         assert!(active.is_running());
         assert!(reloading.is_running());
+        assert!(exited.is_running());
     }
 
     #[test]
