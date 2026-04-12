@@ -174,42 +174,30 @@ async fn current_systemd_status(
     }
 }
 
-async fn wait_systemd_unit_running<'a>(
+async fn wait_systemd_unit_resolved<'a>(
     conn: &'a zbus::Connection,
     unit_name: &str,
 ) -> anyhow::Result<(ResolvedSystemdUnit<'a>, SystemdUnitStatus)> {
     let manager = ManagerProxy::new(conn)
         .await
         .map_err(|err| anyhow::anyhow!("failed to create systemd manager proxy: {err}"))?;
-    let mut resolved_unit: Option<ResolvedSystemdUnit<'_>> = None;
 
     loop {
-        if resolved_unit.is_none() {
-            match resolve_systemd_unit(conn, &manager, unit_name).await {
-                Ok(unit) => {
-                    resolved_unit = Some(unit);
-                }
-                Err(SystemdUnitLookupError::NotFound) => {}
-                Err(SystemdUnitLookupError::Other(err)) => return Err(err),
-            }
-        }
-
-        if let Some(cached_unit) = resolved_unit.as_ref() {
-            match query_systemd_unit_status(&cached_unit.unit_proxy, &cached_unit.service_proxy)
+        match resolve_systemd_unit(conn, &manager, unit_name).await {
+            Ok(resolved_unit) => {
+                match query_systemd_unit_status(
+                    &resolved_unit.unit_proxy,
+                    &resolved_unit.service_proxy,
+                )
                 .await
-            {
-                Ok(status) if status.is_running() => {
-                    let resolved_unit = resolved_unit
-                        .take()
-                        .expect("resolved_unit should exist when status is running");
-                    return Ok((resolved_unit, status));
+                {
+                    Ok(status) => return Ok((resolved_unit, status)),
+                    Err(SystemdUnitLookupError::NotFound) => {}
+                    Err(SystemdUnitLookupError::Other(err)) => return Err(err),
                 }
-                Ok(_) => {}
-                Err(SystemdUnitLookupError::NotFound) => {
-                    resolved_unit = None;
-                }
-                Err(SystemdUnitLookupError::Other(err)) => return Err(err),
             }
+            Err(SystemdUnitLookupError::NotFound) => {}
+            Err(SystemdUnitLookupError::Other(err)) => return Err(err),
         }
 
         sleep(Duration::from_secs(1)).await;
@@ -223,7 +211,7 @@ async fn monitor_systemd_runtime(
     index: usize,
 ) -> anyhow::Result<()> {
     loop {
-        let (resolved_unit, status) = wait_systemd_unit_running(&conn, &unit_name).await?;
+        let (resolved_unit, status) = wait_systemd_unit_resolved(&conn, &unit_name).await?;
         let properties_proxy = PropertiesProxy::builder(&conn)
             .destination("org.freedesktop.systemd1")
             .map_err(|err| anyhow::anyhow!("failed to set systemd destination: {err}"))?
@@ -232,14 +220,12 @@ async fn monitor_systemd_runtime(
             .build()
             .await
             .map_err(|err| anyhow::anyhow!("failed to build systemd properties proxy: {err}"))?;
-        let mut main_pid_changes = properties_proxy
+        let main_pid_changes = properties_proxy
             .receive_properties_changed()
             .await
             .map_err(|err| {
                 anyhow::anyhow!("failed to subscribe to systemd property changes: {err}")
             })?;
-
-        let _ = main_pid_changes.next().await;
         let main_pid_changes = Arc::new(Mutex::new(main_pid_changes));
         let unit_proxy = resolved_unit.unit_proxy.clone();
         let service_proxy = resolved_unit.service_proxy.clone();

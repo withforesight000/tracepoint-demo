@@ -50,7 +50,8 @@ Startup behavior:
 - Containers wait until they are running.
 - If Docker reports a running container with an invalid or missing PID, the daemon defers and
   retries instead of aborting startup.
-- Systemd units wait until they are active.
+- Systemd units do not block startup; the daemon starts monitoring immediately and picks up
+  `MainPID` transitions even before the unit reports `active`.
 - `--all-systemd-processes` and `--all-container-processes` seed the runtime target's current PID
   list at startup, and the startup banner folds those resolved PIDs into the main `PIDs:` list.
 - Runtime target entries in that `PIDs:` list are grouped per target, with `main=...` followed by
@@ -58,6 +59,9 @@ Startup behavior:
 - Container and systemd targets refresh their main PID while the daemon is running.
 - Container and systemd targets print runtime state-change notices, including resolved replacement
   PIDs after restarts or recreation.
+- For systemd targets, that runtime monitoring also covers services started after
+  `tracepoint-demo` itself, so the unit's early startup `execve` activity is still traced once
+  systemd exposes a `MainPID`.
 - `--all-container-processes` also refreshes container state when Docker reports exec activity
   inside the container. A fast cgroup probe seeds the new exec pid, and child commands launched
   from that shell inherit watch state at exec time, so direct `docker exec`, `docker compose exec`,

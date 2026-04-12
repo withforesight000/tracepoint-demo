@@ -72,6 +72,10 @@ source via `aya-build` and `build-std`.
 
 ## Tests and coverage (recommended)
 
+- When behavior changes, add tests for edge cases and transitional states, not only straight-line
+  success paths. Prefer scenario/integration tests for easy-to-miss cases such as runtime target
+  restarts, pre-active `MainPID` updates, and other unusual but important monitor sequences.
+
 Unit tests and lints:
 
 ```bash

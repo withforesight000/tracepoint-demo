@@ -7,9 +7,7 @@ use crate::usecase::{
     policy::{
         watch_container::{ContainerRuntime, ContainerSeedSpec, seed_container_processes},
         watch_pid_or_tty::wait_pid_or_tty_targets,
-        watch_systemd_unit::{
-            SystemdRuntime, SystemdSeedSpec, seed_systemd_unit_processes, wait_systemd_unit_running,
-        },
+        watch_systemd_unit::{SystemdRuntime, SystemdSeedSpec, seed_systemd_unit_processes},
     },
     port::{
         ProcessSeedPort, SharedCgroupPort, SharedContainerRuntimePort, SharedSystemdRuntimePort,
@@ -131,7 +129,7 @@ pub async fn initialize_systemd_runtimes<
 >(
     process_seed: &mut dyn ProcessSeedPort,
     reporter: &mut TReporter,
-    wait_port: &mut TWait,
+    _wait_port: &mut TWait,
     runtime: &SharedSystemdRuntimePort,
     systemd_units: &[String],
     watch_children: bool,
@@ -156,14 +154,9 @@ pub async fn initialize_systemd_runtimes<
             };
 
         let status = runtime.current_status(unit_name).await?;
-        let status = if status.exists && !status.is_running() {
-            wait_systemd_unit_running(runtime.as_ref(), reporter, wait_port, unit_name).await?
-        } else {
-            status
-        };
-
         let current_running = status.is_running();
-        let seeded_pids = if current_running {
+        let seeded_pids = if status.main_pid.is_some() || (current_running && all_systemd_processes)
+        {
             seed_systemd_unit_processes(
                 process_seed,
                 reporter,
@@ -350,42 +343,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initialize_systemd_runtimes_waits_for_running_unit_and_seeds_main_pid() {
-        let statuses = vec![
-            Ok(SystemdUnitRuntimeStatus {
+    async fn initialize_systemd_runtimes_keeps_inactive_unit_without_waiting() {
+        let mut process_seed = MockProcessSeedPort::new();
+        let runtime: SharedSystemdRuntimePort = Arc::new(QueuedSystemdRuntimePort::with_statuses(
+            vec![Ok(SystemdUnitRuntimeStatus {
                 exists: true,
                 active_state: Some("inactive".to_string()),
                 sub_state: Some("dead".to_string()),
                 main_pid: None,
-            }),
-            Ok(SystemdUnitRuntimeStatus {
-                exists: true,
-                active_state: Some("inactive".to_string()),
-                sub_state: Some("dead".to_string()),
-                main_pid: None,
-            }),
-            Ok(SystemdUnitRuntimeStatus {
-                exists: true,
-                active_state: Some("active".to_string()),
-                sub_state: Some("running".to_string()),
-                main_pid: Some(80),
-            }),
-        ];
+            })],
+        ));
+        let mut reporter = MockStatusReporter::new();
+        let mut wait_port = MockWaitPort::new();
+
+        let runtimes = initialize_systemd_runtimes(
+            &mut process_seed,
+            &mut reporter,
+            &mut wait_port,
+            &runtime,
+            &["sshd.service".to_string()],
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(runtimes.len(), 1);
+        assert_eq!(runtimes[0].current_pid, None);
+        assert!(!runtimes[0].current_running);
+    }
+
+    #[tokio::test]
+    async fn initialize_systemd_runtimes_seeds_main_pid_even_before_running() {
         let mut process_seed = MockProcessSeedPort::new();
         process_seed
             .expect_seed_direct()
             .times(1)
             .withf(|pids, flags| pids == [80] && *flags == PROC_FLAG_WATCH_SELF)
             .returning(|_, _| Ok(()));
-        let runtime: SharedSystemdRuntimePort =
-            Arc::new(QueuedSystemdRuntimePort::with_statuses(statuses));
+        let runtime: SharedSystemdRuntimePort = Arc::new(QueuedSystemdRuntimePort::with_statuses(
+            vec![Ok(SystemdUnitRuntimeStatus {
+                exists: true,
+                active_state: Some("activating".to_string()),
+                sub_state: Some("start".to_string()),
+                main_pid: Some(80),
+            })],
+        ));
         let mut reporter = MockStatusReporter::new();
-        reporter.expect_info().times(1).return_const(());
         let mut wait_port = MockWaitPort::new();
-        wait_port
-            .expect_wait()
-            .times(1)
-            .returning(|_, _| boxed_future(Ok(())));
 
         let runtimes = initialize_systemd_runtimes(
             &mut process_seed,
@@ -401,7 +406,8 @@ mod tests {
 
         assert_eq!(runtimes.len(), 1);
         assert_eq!(runtimes[0].current_pid, Some(80));
-        assert!(runtimes[0].current_running);
+        assert!(!runtimes[0].current_running);
+        assert_eq!(runtimes[0].seeded_pids, vec![80]);
     }
 
     #[tokio::test]

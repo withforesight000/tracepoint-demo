@@ -629,3 +629,70 @@ async fn handle_runtime_update_clears_and_reseeds_systemd_roots() {
         vec![WatchOp::Remove(30), WatchOp::Upsert(40, watch_flags(true))]
     );
 }
+
+#[tokio::test]
+async fn handle_runtime_update_seeds_systemd_main_pid_before_unit_reports_running() {
+    let systemd_runtime_port = Arc::new(ScriptedSystemdRuntimePort::default());
+    systemd_runtime_port.push_unit_pids_result(Ok(vec![550233, 550292]));
+
+    let systemd_runtime = systemd_runtime(
+        "ollama.service",
+        false,
+        true,
+        watch_flags(true),
+        None,
+        false,
+        vec![],
+        systemd_runtime_port.clone(),
+    );
+
+    let mut backend = RuntimeUpdateHarness {
+        process_seed: {
+            let mut process_seed = RecordingProcessSeed::default();
+            process_seed.push_direct_result(Ok(()));
+            process_seed
+        },
+        reporter: RecordingStatusReporter::default(),
+        watch_store: RecordingWatchPidStore::from_roots([(10, watch_flags(false))]),
+        static_watch_roots: HashMap::from([(10, watch_flags(false))]),
+        current_watch_roots: HashMap::from([(10, watch_flags(false))]),
+        container_runtimes: vec![],
+        systemd_runtimes: vec![systemd_runtime],
+    };
+
+    let keep_running = handle_runtime_update(
+        &mut backend,
+        Some(RuntimeUpdate::SystemdStatus {
+            index: 0,
+            pid: Some(550233),
+            running: false,
+            active_state: Some("inactive".to_string()),
+            sub_state: Some("dead".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(keep_running);
+    assert_eq!(backend.systemd_runtimes[0].current_pid, Some(550233));
+    assert!(!backend.systemd_runtimes[0].current_running);
+    assert_eq!(
+        backend.systemd_runtimes[0].seeded_pids,
+        vec![550233, 550292]
+    );
+    assert_eq!(
+        backend.process_seed.direct_calls,
+        vec![support::SeedDirectCall {
+            pids: vec![550233, 550292],
+            flags: watch_flags(true),
+        }]
+    );
+    assert_eq!(
+        backend.watch_store.current,
+        HashMap::from([(10, watch_flags(false)), (550233, watch_flags(true))])
+    );
+    assert_eq!(
+        backend.watch_store.ops,
+        vec![WatchOp::Upsert(550233, watch_flags(true))]
+    );
+}

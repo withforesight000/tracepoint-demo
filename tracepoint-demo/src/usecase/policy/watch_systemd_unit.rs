@@ -195,9 +195,10 @@ pub async fn apply_systemd_runtime_update<TReporter: StatusReporter + ?Sized>(
 
     let watch_membership_changed =
         runtime.current_pid != next_pid || runtime.current_running != running;
+    let should_seed = next_pid.is_some() || (running && runtime.all_processes);
 
     if watch_membership_changed {
-        if running && (runtime.all_processes || next_pid.is_some()) {
+        if should_seed {
             runtime.seeded_pids = seed_systemd_unit_processes(
                 process_seed,
                 reporter,
@@ -211,7 +212,7 @@ pub async fn apply_systemd_runtime_update<TReporter: StatusReporter + ?Sized>(
                 },
             )
             .await?;
-        } else if !running {
+        } else {
             runtime.seeded_pids.clear();
         }
     }
@@ -568,5 +569,52 @@ mod tests {
         assert!(runtime.current_running);
         assert_eq!(runtime.current_active_state.as_deref(), Some("reloading"));
         assert_eq!(runtime.current_sub_state.as_deref(), Some("reload"));
+    }
+
+    #[tokio::test]
+    async fn apply_systemd_runtime_update_seeds_pid_before_unit_reports_running() {
+        let mut process_seed = MockProcessSeedPort::new();
+        process_seed
+            .expect_seed_direct()
+            .times(1)
+            .withf(|pids, flags| pids == [88] && *flags == 0x2)
+            .returning(|_, _| Ok(()));
+        let mut runtime = SystemdRuntime {
+            runtime: Arc::new(NoopSystemdRuntimePort),
+            unit_name: "demo.service".to_string(),
+            watch_children: false,
+            all_processes: false,
+            seeded_pids: Vec::new(),
+            flags: 0x2,
+            current_pid: None,
+            current_running: false,
+            current_active_state: Some("inactive".to_string()),
+            current_sub_state: Some("dead".to_string()),
+        };
+        let mut reporter = MockStatusReporter::new();
+        reporter
+            .expect_info()
+            .times(1)
+            .withf(|message| {
+                message
+                    == "systemd unit demo.service changed: state inactive/dead -> activating/start, MainPID none -> 88"
+            })
+            .return_const(());
+
+        apply_systemd_runtime_update(
+            &mut process_seed,
+            &mut reporter,
+            &mut runtime,
+            Some(88),
+            false,
+            Some("activating".to_string()),
+            Some("start".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(runtime.current_pid, Some(88));
+        assert!(!runtime.current_running);
+        assert_eq!(runtime.seeded_pids, vec![88]);
     }
 }

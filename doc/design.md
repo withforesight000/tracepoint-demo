@@ -226,6 +226,11 @@ the Docker exec handoff do not accidentally evict the interactive shell from `PR
 When Docker briefly reports a running container with no usable PID, the startup path treats that
 as "not ready yet" and retries through the normal monitor loop instead of aborting.
 
+Systemd targets now start the daemon without waiting for `active`. If systemd exposes a `MainPID`
+during transitional states such as `activating` or even the odd `inactive/dead + MainPID` window
+seen during some restarts, userspace seeds that PID immediately so the unit's early startup
+`execve` activity is not missed.
+
 When `--all-systemd-processes` or `--all-container-processes` is enabled, the startup banner folds
 the resolved seed set into the main `PIDs:` list instead of appending a separate `pids=[...]`
 suffix. Runtime targets mark the main process as `main=...` and list additional seeded processes
