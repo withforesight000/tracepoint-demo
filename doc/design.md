@@ -161,6 +161,8 @@ The current tree already follows the target layering:
 - `usecase/orchestration/tty.rs` owns TTY normalization helpers
 - `usecase/policy/*.rs` owns target-selection behavior
 - `gateway/*.rs` owns concrete eBPF, procfs, Docker, and systemd I/O
+- the eBPF code prefers older task helpers when they are sufficient, which keeps the tracepoint
+  program loadable on older supported kernels instead of depending on newer BTF-only helpers
 
 ## Suggested reading order
 

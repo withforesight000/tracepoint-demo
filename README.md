@@ -31,7 +31,9 @@ Tagged releases are published on GitHub Releases. Push a semver tag such as `0.1
 workflow runs first, and if it succeeds it dispatches the release workflow to produce Linux
 archives for `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`. The release runners
 are pinned to Ubuntu 22.04 so the published binaries stay compatible with older glibc releases
-than an Ubuntu 24.04 build would require.
+than an Ubuntu 24.04 build would require. The kernel-side code also avoids newer task helpers
+where a stable older alternative is available, which helps the daemon load on older supported
+Linux kernels.
 
 ## Run
 

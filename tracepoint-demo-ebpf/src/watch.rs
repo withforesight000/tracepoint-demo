@@ -1,4 +1,4 @@
-use aya_ebpf::helpers::bpf_get_current_task_btf;
+use aya_ebpf::helpers::bpf_get_current_task;
 
 use crate::{
     maps::{PROC_STATE, WATCH_PIDS},
@@ -23,7 +23,9 @@ pub(crate) unsafe fn lookup_watch_flags(pid: u32) -> Option<u32> {
 }
 
 unsafe fn lookup_watch_flags_from_task_lineage() -> Option<u32> {
-    let mut task = unsafe { bpf_get_current_task_btf() as *mut task_struct };
+    // Use the older helper here so the tracepoint program keeps loading on
+    // kernels that reject bpf_get_current_task_btf in this program type.
+    let mut task = unsafe { bpf_get_current_task() as *mut task_struct };
     if task.is_null() {
         return None;
     }
