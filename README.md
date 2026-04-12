@@ -1,34 +1,25 @@
 # tracepoint-demo
 
 `tracepoint-demo` is a Rust + Aya workspace that traces `sys_enter_execve` and prints `execve`
-activity for a configurable set of processes.
+activity for selected processes.
 
-## Repository layout
+## Project Layout
 
-- `tracepoint-demo/` builds the userspace daemon.
-- `tracepoint-demo-ebpf/` contains the kernel eBPF programs.
-- `tracepoint-demo-common/` contains the shared wire types and constants.
-- Architecture notes live in `doc/design.md`.
-- The userspace crate is split into `infra/`, `gateway/`, and `usecase/`; `doc/design.md`
-  explains the ownership of each layer.
+- `tracepoint-demo/`: userspace daemon
+- `tracepoint-demo-ebpf/`: kernel eBPF programs
+- `tracepoint-demo-common/`: shared wire types and constants
+- `doc/design.md`: architecture and layer ownership
+- `doc/operations.md`: runtime behavior, build notes, and other detailed usage notes
 
 ## Requirements
 
-- Stable Rust toolchain: `rustup toolchain install stable`
-- Nightly Rust toolchain for the embedded eBPF build: `rustup toolchain install nightly --profile minimal --component rust-src`
-- BPF linker: `cargo install bpf-linker`
-- `aya-tool` for BTF generation: `cargo install aya-tool`
+- Stable Rust toolchain
+- Nightly Rust toolchain with `rust-src` for the embedded eBPF build
+- `bpf-linker`
+- `aya-tool`
 - Root privileges or capabilities such as `CAP_BPF`, `CAP_PERFMON`, and `CAP_SYS_RESOURCE`
 
 ## Build
-
-`tracepoint-demo/build.rs` uses `aya-build` to compile the embedded eBPF crate before the userspace
-binary. The final binary includes the BPF object.
-
-That build path currently runs the eBPF crate through the nightly toolchain because `aya-build`
-defaults to nightly for `build-std`-based eBPF compilation. Local builds and CI therefore need the
-nightly toolchain with `rust-src` installed in addition to stable. A separate
-`bpfel-unknown-none` rustup target is not required.
 
 ```bash
 cargo build --release
@@ -36,108 +27,20 @@ cargo build --release
 
 ## Run
 
-Target rules:
-
-- PID inputs and TTY filters are additive. You can combine `--pid`, positional PIDs, and `--tty`
-  in the same invocation, and you can also mix them with container or systemd targets.
-- Container and systemd targets can be combined in the same invocation.
-- `--no-watch-children` limits tracing to the selected roots.
-- `--all-container-processes` and `--all-systemd-processes` override `--no-watch-children` for
-  their respective seeds.
-
-Startup behavior:
-
-- PID and TTY targets wait and retry until matching roots appear.
-- Containers wait until they are running.
-- If Docker reports a running container with an invalid or missing PID, the daemon defers and
-  retries instead of aborting startup.
-- Systemd units do not block startup; the daemon starts monitoring immediately and picks up
-  `MainPID` transitions even before the unit reports `active`.
-- `--all-systemd-processes` and `--all-container-processes` seed the runtime target's current PID
-  list at startup, and the startup banner folds those resolved PIDs into the main grouped
-  `PIDs:` list.
-- Startup banner segments are grouped by source. Explicit `--pid` and positional PID inputs appear
-  as `pid:(pid=1111, 2222)`, TTY roots appear as `tty:/dev/pts/3:(pid=3333, 3334)`, and runtime
-  targets keep their source labels such as `container:my-service:(main=1234)` or
-  `systemd:sshd.service:(main=5678, pid=6789)`.
-- `--all-container-processes` and `--all-systemd-processes` appear in the banner suffix as
-  `(all-container-processes=on)` and `(all-systemd-processes=on)` when enabled.
-- Container and systemd targets refresh their main PID while the daemon is running.
-- Container and systemd targets print runtime state-change notices, including resolved replacement
-  PIDs after restarts or recreation.
-- For systemd targets, that runtime monitoring also covers services started after
-  `tracepoint-demo` itself, so the unit's early startup `execve` activity is still traced once
-  systemd exposes a `MainPID`.
-- `--all-container-processes` also refreshes container state when Docker reports exec activity
-  inside the container. A fast cgroup probe seeds the new exec pid, and child commands launched
-  from that shell inherit watch state at exec time, so direct `docker exec`, `docker compose exec`,
-  and later commands from that shell are picked up. The watch cache is kept at process granularity,
-  so helper-thread exits during the `docker exec` handoff do not drop that shell state.
-- Shell builtins such as `cd`, `pwd`, and `echo` do not emit traces because they do not make an
-  `execve` syscall. External commands launched from the shell do trace.
-- TTY input accepts `/dev/` paths and normalized PTY names such as `pts9`.
-
-Examples:
-
 ```bash
-sudo cargo run --release -- --pid 1234 --pid 9012
-sudo cargo run --release -- 1234 9012 --no-watch-children
-sudo cargo run --release -- --tty /dev/pts/9 --pid 1234 9012
-sudo cargo run --release -- --tty /dev/pts/9 --systemd-unit sshd.service
-sudo cargo run --release -- --container my-service --container sidecar
-sudo cargo run --release -- --container my-service --systemd-unit sshd.service
-sudo cargo run --release -- --systemd-unit sshd.service --systemd-unit user@1000.service --all-systemd-processes
+sudo cargo run --release -- --pid 1234
+sudo cargo run --release -- --container my-service
+sudo cargo run --release -- --systemd-unit sshd.service
 ```
 
-## Testing and coverage
+See `doc/operations.md` for target-selection rules, startup behavior, output format, logging, and
+more examples.
 
-Tests:
+## Tests
 
 ```bash
 cargo test -p tracepoint-demo
 cargo test -p tracepoint-demo-ebpf --lib
-```
-
-The first command covers userspace unit tests and integration tests. The second command covers the
-lightweight helper tests in `tracepoint-demo-ebpf/src/lib.rs`.
-
-The crate keeps shared test support in `tracepoint-demo/src/test_support.rs` so repeated fakes stay
-consistent across policy and orchestration tests.
-
-Static checks:
-
-```bash
-cargo clippy -- -D warnings
-cargo fmt --all -- --check
-```
-
-Coverage (tarpaulin) focuses on userspace logic and skips eBPF/gateway integration boilerplate:
-
-```bash
-cargo tarpaulin --skip-clean --lib \
-  --exclude-files tracepoint-demo-ebpf/src/vmlinux.rs --out Stdout
-```
-
-Each line of output looks like:
-
-```text
-[0.123456] pid=1234 tid=1234 uid=1000 gid=1000 syscall_id=59 comm="bash" filename="/usr/bin/bash" argv="bash -lc ls -la"
-```
-
-`argv` includes the first five captured `execve` arguments, so flag sequences such as `ls -la` are
-visible in the trace output.
-
-Set `RUST_LOG=tracepoint_demo=debug` to show the binary's debug logs.
-
-## Regenerating BTF bindings
-
-`tracepoint-demo-ebpf/src/vmlinux.rs` contains the Aya-generated BTF definitions that the BPF
-programs depend on. Regenerate them when the traced kernel types change or when you build against a
-different kernel:
-
-```bash
-cd tracepoint-demo-ebpf
-aya-tool generate trace_event_raw_sys_enter trace_event_raw_sched_process_fork task_struct bpf_iter_meta bpf_iter__task > src/vmlinux.rs
 ```
 
 ## License
