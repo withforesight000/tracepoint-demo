@@ -19,9 +19,17 @@ env:
 
 jobs:
   ci:
-    name: Rust Checks
-    runs-on: ubuntu-latest
+    name: Rust Checks (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout repository
@@ -51,6 +59,13 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release
+
+      - name: Upload release binary artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: tracepoint-demo-${{ matrix.arch }}
+          path: target/release/tracepoint-demo
+          if-no-files-found: error
 
       - name: Run userspace tests
         run: cargo test -p tracepoint-demo
