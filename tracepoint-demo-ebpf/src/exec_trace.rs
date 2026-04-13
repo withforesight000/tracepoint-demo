@@ -16,12 +16,12 @@ pub(crate) unsafe fn handle_exec_trace(ctx: TracePointContext) -> Result<u32, i6
     let raw: trace_event_raw_sys_enter = unsafe { ctx.read_at(0) }?;
 
     let pid_tgid = bpf_get_current_pid_tgid();
-    let (pid, tid) = split_pid_tgid(pid_tgid);
+    let (tgid, tid) = split_pid_tgid(pid_tgid);
 
     let uid_gid = bpf_get_current_uid_gid();
     let (uid, gid) = split_uid_gid(uid_gid);
 
-    if unsafe { resolve_watch_flags(pid) }.is_none() {
+    if unsafe { resolve_watch_flags(tgid) }.is_none() {
         return Ok(0);
     }
 
@@ -30,7 +30,7 @@ pub(crate) unsafe fn handle_exec_trace(ctx: TracePointContext) -> Result<u32, i6
         unsafe { ptr::write_bytes(event, 0, 1) };
         unsafe {
             (*event).ktime_ns = bpf_ktime_get_ns();
-            (*event).pid = pid;
+            (*event).tgid = tgid;
             (*event).tid = tid;
             (*event).uid = uid;
             (*event).gid = gid;

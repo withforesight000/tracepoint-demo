@@ -112,7 +112,7 @@ fn exec_event_message(event: &ExecEvent) -> String {
         "[{:.6}] pid={} tid={} uid={} gid={} syscall_id={} \
          comm=\"{}\" filename=\"{}\" argv=\"{}\"",
         event.ktime_ns as f64 / 1e9,
-        event.pid,
+        event.tgid,
         event.tid,
         event.uid,
         event.gid,
@@ -278,7 +278,7 @@ mod tests {
     fn exec_event_message_formats_fields() {
         let event = ExecEvent {
             ktime_ns: 123_000_000,
-            pid: 10,
+            tgid: 10,
             tid: 10,
             uid: 1000,
             gid: 1000,
@@ -293,6 +293,7 @@ mod tests {
 
         assert!(message.contains("[0.123000]"));
         assert!(message.contains("pid=10"));
+        assert!(message.contains("tid=10"));
         assert!(message.contains("syscall_id=59"));
         assert!(message.contains("argv=\"\""));
     }
@@ -309,7 +310,7 @@ mod tests {
     fn exec_event_message_escapes_non_utf8_bytes() {
         let mut event = ExecEvent {
             ktime_ns: 123_000_000,
-            pid: 10,
+            tgid: 10,
             tid: 10,
             uid: 1000,
             gid: 1000,
@@ -337,7 +338,7 @@ mod tests {
         print_shutdown_message();
         print_exec_event(&ExecEvent {
             ktime_ns: 0,
-            pid: 1,
+            tgid: 1,
             tid: 1,
             uid: 0,
             gid: 0,

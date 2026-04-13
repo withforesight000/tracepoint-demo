@@ -39,6 +39,9 @@ supported.
 See `doc/operations.md` for target-selection rules, startup behavior, output format, logging, and
 more examples.
 
+Exec lines label the process ID as `pid=` and the thread ID as `tid=` so multithreaded execs
+stay unambiguous.
+
 ## Tests
 
 ```bash

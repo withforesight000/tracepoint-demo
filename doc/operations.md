@@ -59,6 +59,9 @@ Each line of output looks like:
 [0.123456] pid=1234 tid=1234 uid=1000 gid=1000 syscall_id=59 comm="bash" filename="/usr/bin/bash" argv="bash -lc ls -la"
 ```
 
+`pid` is the thread-group ID, which most tools display as the process ID. `tid` is the kernel
+thread ID.
+
 `argv` includes the first five captured `execve` arguments, so flag sequences such as `ls -la`
 stay visible in the trace output.
 

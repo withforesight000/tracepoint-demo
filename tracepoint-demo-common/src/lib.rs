@@ -14,7 +14,7 @@ pub const TASK_REL_TTY_NAME_SIZE: usize = 64;
 #[derive(Clone, Copy)]
 pub struct ExecEvent {
     pub ktime_ns: u64,
-    pub pid: u32,
+    pub tgid: u32,
     pub tid: u32,
     pub uid: u32,
     pub gid: u32,
