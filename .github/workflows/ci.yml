@@ -27,9 +27,9 @@ jobs:
       matrix:
         include:
           - arch: x86_64
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
           - arch: aarch64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
 
     steps:
       - name: Checkout repository
@@ -86,7 +86,7 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+.*$ ]]; then
+          if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Skipping release dispatch for non-release tag: $TAG"
             exit 0
           fi
