@@ -8,16 +8,33 @@ activity for selected processes.
 - `tracepoint-demo/`: userspace daemon
 - `tracepoint-demo-ebpf/`: kernel eBPF programs
 - `tracepoint-demo-common/`: shared wire types and constants
-- `doc/design.md`: architecture and layer ownership
+- `doc/design.md`: design-document index
+- `doc/tracepoint-demo-design.md`: userspace daemon design
+- `doc/tracepoint-demo-ebpf-design.md`: eBPF-side design
 - `doc/operations.md`: runtime behavior, build notes, and other detailed usage notes
 
 ## Requirements
 
-- Stable Rust toolchain
-- Nightly Rust toolchain with `rust-src` for the embedded eBPF build
-- `bpf-linker`
-- `aya-tool`
-- Root privileges or capabilities such as `CAP_BPF`, `CAP_PERFMON`, and `CAP_SYS_RESOURCE`
+Install the Rust toolchains and build tools used by local builds and CI:
+
+```bash
+rustup toolchain install stable --profile minimal
+rustup component add --toolchain stable rustfmt clippy
+rustup toolchain install nightly --profile minimal --component rust-src
+cargo install --locked bpf-linker
+```
+
+`aya-tool` is only required when regenerating `tracepoint-demo-ebpf/src/vmlinux.rs`:
+
+```bash
+cargo install --locked aya-tool
+```
+
+You do not need `rustup target add bpfel-unknown-none`; `tracepoint-demo/build.rs` builds the
+embedded eBPF crate through `aya-build`.
+
+Running the daemon requires root privileges or capabilities such as `CAP_BPF`, `CAP_PERFMON`, and
+`CAP_SYS_RESOURCE`.
 
 ## Build
 
@@ -47,6 +64,8 @@ stay unambiguous.
 ```bash
 cargo test -p tracepoint-demo
 cargo test -p tracepoint-demo-ebpf --lib
+cargo clippy -- -D warnings
+cargo fmt --all -- --check
 ```
 
 To exercise the kernel verifier on a live machine, run the optional smoke test as root:
