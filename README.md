@@ -59,6 +59,11 @@ more examples.
 Exec lines label the process ID as `pid=` and the thread ID as `tid=` so multithreaded execs
 stay unambiguous.
 
+If the daemon fails to load the eBPF program with a kernel verifier error on your machine, Aya's
+CO-RE (Compile Once - Run Everywhere) support may not be sufficient for that kernel/BTF combination. In that case, regenerate
+`tracepoint-demo-ebpf/src/vmlinux.rs` with `aya-tool` and rebuild. See `doc/operations.md` for the
+exact regeneration command.
+
 ## Tests
 
 ```bash
