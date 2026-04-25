@@ -474,6 +474,14 @@ where
                 });
             }
             ContainerMonitorSignal::Poll => {
+                // This is the fallback resynchronization path.
+                //
+                // Docker events are not a complete source of truth for the
+                // container's main PID. The PID may change because the container
+                // was restarted, recreated, or otherwise drifted from what the
+                // previous event stream observed. Polling lets us compare the
+                // current main PID against the last value we reported and update
+                // runtime state only when there is an actual change.
                 let next_pid = query_main_pid().await?;
                 if next_pid != current_pid {
                     current_pid = next_pid;
