@@ -108,9 +108,13 @@ fn spawn_container_cgroup_probe(
     tx: mpsc::UnboundedSender<RuntimeUpdate>,
 ) {
     tokio::spawn(async move {
+        // First resolve the container's current main PID. We need a concrete PID
+        // before we can look up the container's cgroup membership.
         let current_pid = match query_container_main_pid(&docker, &name_or_id).await {
             Ok(Some(pid)) => pid,
             Ok(None) => {
+                // If Docker still does not expose a usable PID, there is nothing
+                // to probe yet. Give up quietly and let the next event retry.
                 log::debug!(
                     "docker cgroup probe for {} could not resolve current container pid",
                     name_or_id
@@ -118,6 +122,8 @@ fn spawn_container_cgroup_probe(
                 return;
             }
             Err(err) => {
+                // Any inspect failure here means we cannot safely continue to the
+                // cgroup lookup step.
                 log::debug!(
                     "docker cgroup probe for {} failed to resolve current container pid: {}",
                     name_or_id,
@@ -127,9 +133,13 @@ fn spawn_container_cgroup_probe(
             }
         };
 
+        // Use procfs to map that PID to the cgroup v2 path. The cgroup path is
+        // what lets us observe the container's process set directly.
         let cgroup_path = match crate::gateway::procfs::read_cgroup_v2_path(current_pid) {
             Ok(path) => path,
             Err(err) => {
+                // If the PID cannot be mapped to a cgroup path, we cannot inspect
+                // membership changes for this container.
                 log::debug!(
                     "docker cgroup probe for {} failed to resolve cgroup path for pid {}: {}",
                     name_or_id,
@@ -140,10 +150,15 @@ fn spawn_container_cgroup_probe(
             }
         };
 
+        // Capture the current membership as a baseline snapshot. This probe is
+        // best-effort: if the PID is already present here, it will not be treated
+        // as "new" by the diff below.
         let mut known_pids: HashSet<u32> =
             match crate::gateway::procfs::read_cgroup_procs(&cgroup_path) {
                 Ok(pids) => pids.into_iter().collect(),
                 Err(err) => {
+                    // If we cannot read cgroup.procs even once, there is no reliable
+                    // baseline to compare against, so the probe stops here.
                     log::debug!(
                         "docker cgroup probe for {} failed to read cgroup.procs at {}: {}",
                         name_or_id,
@@ -154,15 +169,25 @@ fn spawn_container_cgroup_probe(
                 }
             };
 
+        // Poll the cgroup briefly. The goal is to catch a PID that appears just
+        // after exec_create, before the rest of the runtime has a chance to miss it.
+        // This is not a guarantee: exec_start also does a direct inspect_exec()
+        // lookup, and the two paths together reduce the chance of missing the
+        // container's new process.
         for _ in 0..100 {
             match crate::gateway::procfs::read_cgroup_procs(&cgroup_path) {
                 Ok(pids) => {
+                    // Keep only PIDs that were not present in the baseline snapshot.
+                    // If a PID was already in known_pids here, this probe treats it
+                    // as already accounted for rather than "new".
                     let extra_pids: Vec<u32> = pids
                         .into_iter()
                         .filter(|pid| known_pids.insert(*pid))
                         .collect();
 
                     if !extra_pids.is_empty() {
+                        // As soon as we see a new PID, tell the runtime layer to
+                        // refresh the container state and seed those extra PIDs.
                         log::debug!(
                             "docker cgroup probe for {} resolved new pid(s) {:?}",
                             name_or_id,
@@ -178,6 +203,8 @@ fn spawn_container_cgroup_probe(
                     }
                 }
                 Err(err) => {
+                    // If the cgroup disappears or becomes unreadable, this probe no
+                    // longer has a trustworthy signal to follow.
                     log::debug!(
                         "docker cgroup probe for {} failed to reread cgroup.procs at {}: {}",
                         name_or_id,
@@ -188,9 +215,13 @@ fn spawn_container_cgroup_probe(
                 }
             }
 
+            // Short sleep so we can catch the new PID soon after exec_create without
+            // holding the runtime loop hostage.
             sleep(Duration::from_millis(1)).await;
         }
 
+        // No new PID appeared within the probe window. That is not an error; the
+        // normal polling path will continue to watch the container.
         log::debug!(
             "docker cgroup probe for {} timed out without seeing a new pid",
             name_or_id
@@ -203,6 +234,9 @@ async fn monitor_container_runtime(
     name_or_id: String,
     all_processes: bool,
     tx: mpsc::UnboundedSender<RuntimeUpdate>,
+    // Position of this container in the runtime list. The same number is sent back
+    // in RuntimeUpdate so the upper layers can update the exact container entry
+    // that owns this monitor.
     index: usize,
 ) -> anyhow::Result<()> {
     let query_docker = docker.clone();
@@ -318,10 +352,19 @@ async fn monitor_container_runtime(
                                     if is_exec_event {
                                         match exec_id_from_event(&event) {
                                             Some(exec_id) => {
+                                                // `exec_create` / `exec_start` indicate that a new
+                                                // process may have appeared inside the container.
+                                                // The goal here is not to log Docker events, but to
+                                                // update WATCH_PIDS quickly enough that we do not miss
+                                                // the next execve.
                                                 if matches!(
                                                     action,
                                                     Some(action) if action.starts_with("exec_create")
                                                 ) {
+                                                    // `exec_create` happens very early, when the exec PID
+                                                    // may not yet be stable in Docker's inspect APIs.
+                                                    // Spawn a short-lived cgroup probe so we can wait for
+                                                    // the new PID to show up in the container's cgroup.
                                                     spawn_container_cgroup_probe(
                                                         query_docker.clone(),
                                                         name_or_id.clone(),
@@ -344,14 +387,23 @@ async fn monitor_container_runtime(
                                                         pid
                                                     );
                                                     if let Ok(Some(pid)) = pid {
+                                                        // `exec_start` can often be resolved to a PID
+                                                        // immediately. When that works, return it as an
+                                                        // additional pid that should be watched right away.
                                                         return Ok(ContainerMonitorSignal::Refresh {
                                                             extra_pids: vec![pid],
                                                         });
                                                     }
                                                 }
+                                                // Do not end monitoring after one Docker exec event.
+                                                // Keep looping so we can continue tracking main pid
+                                                // changes and any later events.
                                                 Ok(ContainerMonitorSignal::Poll)
                                             }
                                             None => {
+                                                // If we cannot extract an exec ID, we do not have
+                                                // enough information to drive a watch update.
+                                                // Fall back to normal polling.
                                                 log::debug!(
                                                     "docker event for {}: action={:?} missing exec id",
                                                     name_or_id,
@@ -361,6 +413,9 @@ async fn monitor_container_runtime(
                                             }
                                         }
                                     } else {
+                                        // Non-exec Docker events are not directly useful for this
+                                        // watcher. Consume the event and fall back to periodic
+                                        // polling.
                                         Ok(ContainerMonitorSignal::Poll)
                                     }
                                 }
