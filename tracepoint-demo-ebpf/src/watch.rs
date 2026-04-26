@@ -1,5 +1,4 @@
-use aya_ebpf::helpers::{bpf_get_current_task, bpf_probe_read_kernel};
-use core::ptr;
+use aya_ebpf::helpers::bpf_get_current_task;
 
 use crate::{
     maps::{PROC_STATE, WATCH_PIDS},
@@ -24,18 +23,15 @@ pub(crate) unsafe fn lookup_watch_flags(pid: u32) -> Option<u32> {
 }
 
 unsafe fn read_task_tgid(task: *mut task_struct) -> Option<u32> {
-    let pid = unsafe { bpf_probe_read_kernel(ptr::addr_of!((*task).tgid)) }.ok()?;
-    Some(pid as u32)
+    unsafe { crate::kernel_read::read_task_tgid(task) }
 }
 
 unsafe fn read_task_parent(task: *mut task_struct) -> Option<*mut task_struct> {
-    let parent = unsafe { bpf_probe_read_kernel(ptr::addr_of!((*task).parent)) }.ok()?;
-    (!parent.is_null()).then_some(parent)
+    unsafe { crate::kernel_read::read_task_parent(task) }
 }
 
 unsafe fn read_task_real_parent(task: *mut task_struct) -> Option<*mut task_struct> {
-    let real_parent = unsafe { bpf_probe_read_kernel(ptr::addr_of!((*task).real_parent)) }.ok()?;
-    (!real_parent.is_null()).then_some(real_parent)
+    unsafe { crate::kernel_read::read_task_real_parent(task) }
 }
 
 unsafe fn lookup_watch_flags_from_task_lineage(current_pid: u32) -> Option<u32> {

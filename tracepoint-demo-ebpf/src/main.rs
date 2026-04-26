@@ -8,6 +8,7 @@ use aya_ebpf::{
 use tracepoint_demo_ebpf::exiting_process_pid;
 
 mod exec_trace;
+mod kernel_read;
 mod maps;
 mod task_iter;
 mod watch;

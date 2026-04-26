@@ -1,13 +1,16 @@
-use core::{ffi::c_void, mem::size_of};
+use core::{mem::MaybeUninit, ptr};
 
-use aya_ebpf::{
-    bindings::seq_file,
-    helpers::{bpf_probe_read_kernel_str_bytes, generated::bpf_seq_write},
+use aya_ebpf::helpers::generated::bpf_seq_write;
+
+use tracepoint_demo_common::TaskRel;
+
+use crate::{
+    kernel_read::{
+        read_iter_meta, read_iter_seq, read_iter_task, read_signal_tty, read_task_real_parent,
+        read_task_signal, read_task_tgid, read_tty_name,
+    },
+    vmlinux::bpf_iter__task,
 };
-
-use tracepoint_demo_common::{TASK_REL_TTY_NAME_SIZE, TaskRel};
-
-use crate::vmlinux::bpf_iter__task;
 
 pub(crate) unsafe fn run_task_iter(ctx: *mut bpf_iter__task) -> i32 {
     if ctx.is_null() {
@@ -15,47 +18,54 @@ pub(crate) unsafe fn run_task_iter(ctx: *mut bpf_iter__task) -> i32 {
     }
 
     unsafe {
-        let meta = (*ctx).__bindgen_anon_1.meta;
-        if meta.is_null() {
-            return 0;
-        }
-        let seq = (*meta).__bindgen_anon_1.seq as *mut seq_file;
-        if seq.is_null() {
-            return 0;
-        }
-
-        let task = (*ctx).__bindgen_anon_2.task;
-        if task.is_null() {
-            return 0;
-        }
-
-        let pid = (*task).tgid as u32;
-        let parent = (*task).real_parent;
-        let ppid = if parent.is_null() {
-            0
-        } else {
-            (*parent).tgid as u32
+        let meta = match read_iter_meta(ctx) {
+            Some(meta) => meta,
+            None => return 0,
+        };
+        let seq = match read_iter_seq(meta) {
+            Some(seq) => seq,
+            None => return 0,
+        };
+        let task = match read_iter_task(ctx) {
+            Some(task) => task,
+            None => return 0,
         };
 
-        let mut rel = TaskRel {
-            pid,
-            ppid,
-            tty_name: [0u8; TASK_REL_TTY_NAME_SIZE],
+        let pid = match read_task_tgid(task) {
+            Some(pid) => pid,
+            None => return 0,
+        };
+        let ppid = match read_task_real_parent(task) {
+            Some(parent) => read_task_tgid(parent).unwrap_or(0),
+            None => 0,
         };
 
-        if !(*task).signal.is_null() {
-            let signal = (*task).signal;
-            let tty = (*signal).tty;
-            if !tty.is_null() {
-                let name_ptr = (*tty).name.as_ptr() as *const u8;
-                let _ = bpf_probe_read_kernel_str_bytes(name_ptr, &mut rel.tty_name);
-            }
+        let mut rel = MaybeUninit::<TaskRel>::uninit();
+        let rel_ptr = rel.as_mut_ptr();
+
+        ptr::addr_of_mut!((*rel_ptr).pid).write(pid);
+        ptr::addr_of_mut!((*rel_ptr).ppid).write(ppid);
+
+        let tty_name_words = ptr::addr_of_mut!((*rel_ptr).tty_name).cast::<u64>();
+        ptr::write_volatile(tty_name_words.add(0), 0);
+        ptr::write_volatile(tty_name_words.add(1), 0);
+        ptr::write_volatile(tty_name_words.add(2), 0);
+        ptr::write_volatile(tty_name_words.add(3), 0);
+        ptr::write_volatile(tty_name_words.add(4), 0);
+        ptr::write_volatile(tty_name_words.add(5), 0);
+        ptr::write_volatile(tty_name_words.add(6), 0);
+        ptr::write_volatile(tty_name_words.add(7), 0);
+
+        if let Some(signal) = read_task_signal(task)
+            && let Some(tty) = read_signal_tty(signal)
+        {
+            read_tty_name(tty, &mut (*rel_ptr).tty_name);
         }
 
         let _ = bpf_seq_write(
-            seq,
-            &rel as *const _ as *const c_void,
-            size_of::<TaskRel>() as u32,
+            seq.cast(),
+            rel_ptr.cast(),
+            core::mem::size_of::<TaskRel>() as u32,
         );
         0
     }
