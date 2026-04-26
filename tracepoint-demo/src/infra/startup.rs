@@ -255,6 +255,8 @@ pub async fn prepare_prepared_app<TReporter: StatusReporter + ?Sized, TWait: Wai
     let container_runtime_available = container_runtime.is_some();
     let systemd_runtime_available = systemd_runtime.is_some();
     let cgroup_port: SharedCgroupPort = cgroup_port;
+    // Clone the shared Arc handles so prepare_runtime_plan() can use trait-object ports,
+    // while we still keep the concrete gateways in PreparedApp for later runtime use.
     let container_runtime_for_prepare: Option<SharedContainerRuntimePort> =
         container_runtime.as_ref().map(|runtime| {
             let runtime: SharedContainerRuntimePort = runtime.clone();

@@ -23,6 +23,9 @@ pub struct StartupPrepareInputs<'a> {
 }
 #[allow(async_fn_in_trait)]
 pub trait StartupPrepareBackend {
+    // These associated types let each backend choose its own concrete runtime types.
+    // prepare_runtime_plan() stays generic, but the returned plan still carries the
+    // exact runtime types produced by the backend.
     type ContainerRuntime;
     type SystemdRuntime;
 
@@ -60,6 +63,8 @@ pub trait StartupPrepareBackend {
 pub async fn prepare_runtime_plan<TBackend: StartupPrepareBackend>(
     backend: &mut TBackend,
     inputs: StartupPrepareInputs<'_>,
+    // The `TBackend::...` part in the return type means:
+    // use the concrete runtime types chosen by the backend implementation.
 ) -> anyhow::Result<StartupRuntimePlan<TBackend::ContainerRuntime, TBackend::SystemdRuntime>> {
     let has_runtime_targets = !inputs.containers.is_empty() || !inputs.systemd_units.is_empty();
 
