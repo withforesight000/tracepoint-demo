@@ -13,7 +13,7 @@ use crate::usecase::{
         watch_container::{ContainerRuntime, apply_container_runtime_update},
         watch_systemd_unit::{SystemdRuntime, apply_systemd_runtime_update},
     },
-    port::{ProcessSeedPort, RuntimeUpdate, StatusReporter},
+    port::{ProcessSeedPort, RuntimeUpdate, StatusReporter, WatchPidStore},
 };
 
 trait RuntimeUpdateBackend {
@@ -26,6 +26,7 @@ trait RuntimeUpdateBackend {
 
 struct AppRuntimeUpdateBackend<'a> {
     state: &'a mut AppState,
+    watch_pids: &'a mut dyn WatchPidStore,
 }
 
 impl RuntimeUpdateBackend for AppRuntimeUpdateBackend<'_> {
@@ -50,7 +51,7 @@ impl RuntimeUpdateBackend for AppRuntimeUpdateBackend<'_> {
             &self.state.systemd_runtimes,
         );
         sync_watch_pids(
-            &mut self.state.watch_pids,
+            &mut *self.watch_pids,
             &mut self.state.current_watch_roots,
             &desired_roots,
         )?;
@@ -112,12 +113,13 @@ impl<TReporter: StatusReporter + ?Sized> RuntimeUpdateHandler
 
 pub async fn handle_runtime_update_with_state<TReporter: StatusReporter + ?Sized>(
     ebpf: &mut Ebpf,
+    watch_pids: &mut dyn WatchPidStore,
     state: &mut AppState,
     maybe_update: Option<RuntimeUpdate>,
     reporter: &mut TReporter,
 ) -> anyhow::Result<bool> {
     let mut process_seed = EbpfProcessSeedPort::new(ebpf);
-    let mut backend = AppRuntimeUpdateBackend { state };
+    let mut backend = AppRuntimeUpdateBackend { state, watch_pids };
     let mut handler = StateRuntimeUpdateHandler {
         process_seed: &mut process_seed,
         backend: &mut backend,

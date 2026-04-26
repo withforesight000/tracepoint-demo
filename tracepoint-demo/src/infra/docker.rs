@@ -1,10 +1,10 @@
 use bollard::Docker;
 
-use crate::{gateway::docker, usecase::port::SharedContainerRuntimePort};
+use crate::gateway::docker;
 
 pub fn connect_if_needed(
     containers: &[String],
-) -> anyhow::Result<Option<SharedContainerRuntimePort>> {
+) -> anyhow::Result<Option<std::sync::Arc<docker::DockerContainerRuntimeGateway>>> {
     if containers.is_empty() {
         return Ok(None);
     }

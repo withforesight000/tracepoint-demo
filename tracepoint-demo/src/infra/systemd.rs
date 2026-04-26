@@ -1,8 +1,8 @@
-use crate::{gateway::systemd, usecase::port::SharedSystemdRuntimePort};
+use crate::gateway::systemd;
 
 pub async fn connect_if_needed(
     systemd_units: &[String],
-) -> anyhow::Result<Option<SharedSystemdRuntimePort>> {
+) -> anyhow::Result<Option<std::sync::Arc<systemd::SystemdRuntimeGateway>>> {
     if systemd_units.is_empty() {
         return Ok(None);
     }

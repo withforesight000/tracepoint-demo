@@ -1,10 +1,7 @@
 use std::collections::HashSet;
 
-use tokio::sync::mpsc;
-
 use crate::usecase::port::{
-    CgroupPort, ProcessSeedPort, RuntimeUpdate, SharedCgroupPort, SharedContainerRuntimePort,
-    StatusReporter,
+    CgroupPort, ProcessSeedPort, SharedCgroupPort, SharedContainerRuntimePort, StatusReporter,
 };
 
 pub struct ContainerRuntime {
@@ -177,24 +174,6 @@ pub async fn apply_container_runtime_update<TReporter: StatusReporter + ?Sized>(
     Ok(())
 }
 
-pub fn spawn_monitors(
-    container_runtimes: &[ContainerRuntime],
-    update_tx: &mpsc::UnboundedSender<RuntimeUpdate>,
-) -> Vec<tokio::task::JoinHandle<()>> {
-    container_runtimes
-        .iter()
-        .enumerate()
-        .map(|(index, runtime)| {
-            runtime.runtime.spawn_monitor(
-                runtime.name_or_id.clone(),
-                runtime.all_processes,
-                update_tx.clone(),
-                index,
-            )
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -203,31 +182,6 @@ mod tests {
     use crate::test_support::{
         MockCgroupPort, MockProcessSeedPort, MockStatusReporter, NoopContainerRuntimePort,
     };
-
-    #[tokio::test]
-    async fn spawn_monitors_empty_returns_empty() {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let handles = spawn_monitors(&[], &tx);
-        assert!(handles.is_empty());
-    }
-
-    #[tokio::test]
-    async fn spawn_monitors_non_empty_returns_handles() {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let runtime = ContainerRuntime {
-            cgroup_port: Arc::new(MockCgroupPort::new()),
-            runtime: Arc::new(NoopContainerRuntimePort),
-            name_or_id: "dummy".to_string(),
-            watch_children: true,
-            all_processes: false,
-            flags: 0,
-            seeded_pids: Vec::new(),
-            current_pid: None,
-        };
-
-        let handles = spawn_monitors(&[runtime], &tx);
-        assert_eq!(handles.len(), 1);
-    }
 
     #[tokio::test]
     async fn seed_container_processes_uses_direct_seed_for_all_processes_when_cgroup_lookup_succeeds()

@@ -13,7 +13,7 @@ use crate::{
     infra::presentation::runtime_updates::handle_runtime_update_with_state,
     usecase::{
         orchestration::state::{AppState, StartupWatchPidGroup},
-        port::RuntimeUpdate,
+        port::{RuntimeUpdate, WatchPidStore},
     },
 };
 use tracepoint_demo_common::EXEC_EVENTS_MAP;
@@ -28,6 +28,7 @@ pub struct RuntimeLoopConfig<'a> {
 
 pub async fn run(
     ebpf: &mut Ebpf,
+    watch_pids: &mut dyn WatchPidStore,
     state: &mut AppState,
     update_rx: &mut mpsc::UnboundedReceiver<RuntimeUpdate>,
     config: RuntimeLoopConfig<'_>,
@@ -60,7 +61,7 @@ pub async fn run(
             }
 
             maybe_update = update_rx.recv() => {
-                if !handle_runtime_update_with_state(ebpf, state, maybe_update, &mut reporter).await? {
+                if !handle_runtime_update_with_state(ebpf, watch_pids, state, maybe_update, &mut reporter).await? {
                     break;
                 }
             }

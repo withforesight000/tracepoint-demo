@@ -18,9 +18,7 @@ use tokio::{
     time::sleep,
 };
 
-use crate::usecase::port::{
-    BoxFuture, ContainerRuntimePort, RuntimeUpdate, SharedContainerRuntimePort,
-};
+use crate::usecase::port::{BoxFuture, ContainerRuntimePort, RuntimeUpdate};
 
 #[derive(Debug)]
 enum ContainerMonitorSignal {
@@ -28,7 +26,7 @@ enum ContainerMonitorSignal {
     Refresh { extra_pids: Vec<u32> },
 }
 
-struct DockerContainerRuntimeGateway {
+pub struct DockerContainerRuntimeGateway {
     docker: Docker,
 }
 
@@ -504,8 +502,10 @@ impl ContainerRuntimePort for DockerContainerRuntimeGateway {
     ) -> BoxFuture<'a, anyhow::Result<Option<u32>>> {
         Box::pin(async move { query_container_main_pid(&self.docker, name_or_id).await })
     }
+}
 
-    fn spawn_monitor(
+impl DockerContainerRuntimeGateway {
+    pub fn spawn_monitor(
         &self,
         name_or_id: String,
         all_processes: bool,
@@ -532,7 +532,7 @@ impl ContainerRuntimePort for DockerContainerRuntimeGateway {
     }
 }
 
-pub fn runtime_port(docker: Docker) -> SharedContainerRuntimePort {
+pub fn runtime_port(docker: Docker) -> std::sync::Arc<DockerContainerRuntimeGateway> {
     Arc::new(DockerContainerRuntimeGateway { docker })
 }
 

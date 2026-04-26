@@ -17,7 +17,10 @@ use tracepoint_demo_common::{
     EXEC_EVENTS_MAP, ExecEvent, PROC_FLAG_WATCH_CHILDREN, PROC_STATE_MAP, TaskRel, WATCH_PIDS_MAP,
 };
 
-use crate::usecase::{orchestration::tty::normalize_tty_name, port::ProcessSeedPort};
+use crate::usecase::{
+    orchestration::tty::normalize_tty_name,
+    port::{ProcessSeedPort, WatchPidStore},
+};
 
 pub struct EbpfProcessSeedPort<'a> {
     ebpf: &'a mut Ebpf,
@@ -41,6 +44,16 @@ impl ProcessSeedPort for EbpfProcessSeedPort<'_> {
 
     fn seed_direct(&mut self, pids: &[u32], flags: u32) -> anyhow::Result<()> {
         seed_proc_state_direct(self.ebpf, pids, flags)
+    }
+}
+
+impl WatchPidStore for UserHashMap<MapData, u32, u32> {
+    fn remove_watch_pid(&mut self, pid: u32) -> anyhow::Result<()> {
+        self.remove(&pid).map_err(Into::into)
+    }
+
+    fn upsert_watch_pid(&mut self, pid: u32, flags: u32) -> anyhow::Result<()> {
+        self.insert(pid, flags, 0).map_err(Into::into)
     }
 }
 

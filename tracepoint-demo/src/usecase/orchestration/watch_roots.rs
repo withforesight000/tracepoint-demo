@@ -1,6 +1,6 @@
 use std::collections::HashMap as StdHashMap;
 
-use aya::maps::{MapData, hash_map::HashMap as UserHashMap};
+use crate::usecase::port::WatchPidStore;
 
 pub fn add_watch_root(watch_roots: &mut StdHashMap<u32, u32>, pid: u32, flags: u32) {
     watch_roots
@@ -90,23 +90,7 @@ pub fn collect_watch_roots(
     roots
 }
 
-pub trait WatchPidStore {
-    fn remove_watch_pid(&mut self, pid: u32) -> anyhow::Result<()>;
-
-    fn upsert_watch_pid(&mut self, pid: u32, flags: u32) -> anyhow::Result<()>;
-}
-
-impl WatchPidStore for UserHashMap<MapData, u32, u32> {
-    fn remove_watch_pid(&mut self, pid: u32) -> anyhow::Result<()> {
-        self.remove(&pid).map_err(Into::into)
-    }
-
-    fn upsert_watch_pid(&mut self, pid: u32, flags: u32) -> anyhow::Result<()> {
-        self.insert(pid, flags, 0).map_err(Into::into)
-    }
-}
-
-pub fn sync_watch_pids<S: WatchPidStore>(
+pub fn sync_watch_pids<S: WatchPidStore + ?Sized>(
     watch_pids: &mut S,
     current_roots: &mut StdHashMap<u32, u32>,
     desired_roots: &StdHashMap<u32, u32>,

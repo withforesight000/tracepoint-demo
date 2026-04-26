@@ -1,10 +1,9 @@
 use std::collections::HashSet;
 
 use std::time::Duration;
-use tokio::sync::mpsc;
 
 use crate::usecase::port::{
-    ProcessSeedPort, RuntimeUpdate, SharedSystemdRuntimePort, StatusReporter, SystemdRuntimePort,
+    ProcessSeedPort, SharedSystemdRuntimePort, StatusReporter, SystemdRuntimePort,
     SystemdUnitRuntimeStatus, WaitPort,
 };
 
@@ -231,21 +230,6 @@ pub async fn apply_systemd_runtime_update<TReporter: StatusReporter + ?Sized>(
     Ok(())
 }
 
-pub fn spawn_monitors(
-    systemd_runtimes: &[SystemdRuntime],
-    update_tx: &mpsc::UnboundedSender<RuntimeUpdate>,
-) -> Vec<tokio::task::JoinHandle<()>> {
-    systemd_runtimes
-        .iter()
-        .enumerate()
-        .map(|(index, runtime)| {
-            runtime
-                .runtime
-                .spawn_monitor(runtime.unit_name.clone(), update_tx.clone(), index)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -255,13 +239,6 @@ mod tests {
         MockProcessSeedPort, MockStatusReporter, MockWaitPort, NoopSystemdRuntimePort,
         QueuedSystemdRuntimePort, boxed_future,
     };
-
-    #[tokio::test]
-    async fn spawn_monitors_empty_returns_empty() {
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let handles = spawn_monitors(&[], &tx);
-        assert!(handles.is_empty());
-    }
 
     #[tokio::test]
     async fn wait_systemd_unit_running_returns_immediately_when_running() {

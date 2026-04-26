@@ -46,6 +46,7 @@ Dependency direction is one-way:
 - `src/main.rs`: async process entry point
 - `src/infra/bootstrap.rs`: composition root
 - `src/infra/startup.rs`: startup preparation and conversion from boot resources to `PreparedApp`
+- `src/infra/runtime_monitors.rs`: monitor task spawning for Docker and systemd targets
 - `src/infra/runtime_loop.rs`: top-level async event loop
 
 ### Presentation and outer adapters
@@ -60,7 +61,7 @@ Dependency direction is one-way:
 
 ### Usecase layer
 
-- `src/usecase/policy/trace_selected_targets.rs`: top-level tracing request and monitor spawning
+- `src/usecase/policy/trace_selected_targets.rs`: tracing request DTO
 - `src/usecase/policy/watch_pid_or_tty.rs`: PID and TTY watch behavior
 - `src/usecase/policy/watch_container.rs`: container target behavior and runtime update policy
 - `src/usecase/policy/watch_systemd_unit.rs`: systemd target behavior and runtime update policy
@@ -68,7 +69,7 @@ Dependency direction is one-way:
 - `src/usecase/orchestration/startup_runtime.rs`: startup seeding and runtime initialization
 - `src/usecase/orchestration/watch_roots.rs`: merged watch-root collection and `WATCH_PIDS` sync
 - `src/usecase/orchestration/tty.rs`: TTY normalization helpers
-- `src/usecase/orchestration/state.rs`: `AppState`, `PreparedApp`, and startup banner grouping
+- `src/usecase/orchestration/state.rs`: `AppState` and startup banner grouping
 - `src/usecase/port/*.rs`: ports and DTOs for the inner layer
 
 ### Gateway layer
@@ -112,8 +113,8 @@ Its main responsibilities are:
 - compute watch flags from `watch_children`
 - adapt concrete resources into the `StartupPrepareBackend` interface
 - collect startup watch groups for the banner
-- build `PreparedApp`, which contains the loaded `Ebpf`, `AppState`, startup banner data, and the
-  effective watch-mode flags
+- build `PreparedApp`, which contains the loaded `Ebpf`, the `WATCH_PIDS` map handle, `AppState`,
+  startup banner data, and the effective watch-mode flags
 
 ### 4. Usecase startup logic
 
@@ -135,7 +136,6 @@ The main userspace state lives in `usecase/orchestration/state.rs`.
 
 - `AppState.static_watch_roots`: roots established from explicit startup inputs
 - `AppState.current_watch_roots`: merged roots currently expected to be in `WATCH_PIDS`
-- `AppState.watch_pids`: userspace handle to the kernel `WATCH_PIDS` map
 - `AppState.container_runtimes`: runtime state for each requested container target
 - `AppState.systemd_runtimes`: runtime state for each requested systemd target
 
@@ -149,9 +149,10 @@ The usecase layer defines ports under `src/usecase/port/`.
 Important contracts are:
 
 - `ProcessSeedPort`: seed watch state from the task iterator or by direct PID insertion
-- `ContainerRuntimePort`: resolve container main PIDs and spawn monitor tasks
-- `SystemdRuntimePort`: query unit status, list unit PIDs, and spawn monitor tasks
+- `ContainerRuntimePort`: resolve container main PIDs
+- `SystemdRuntimePort`: query unit status and list unit PIDs
 - `CgroupPort`: read cgroup paths and members for container process expansion
+- `WatchPidStore`: update the userspace-managed `WATCH_PIDS` map
 - `StatusReporter`: emit startup and runtime notices
 - `WaitPort`: wait during startup retry loops with interrupt awareness
 
@@ -178,6 +179,8 @@ already-established runtime state.
 - The composition root stays in `infra/bootstrap.rs`; `main.rs` remains intentionally tiny.
 - Startup preparation is split so `infra/` handles concrete resource ownership and `usecase/`
   decides watch behavior.
+- `WATCH_PIDS` is owned by `infra/` and synced through a `WatchPidStore` port, while `AppState`
+  stays free of eBPF map handles.
 - `WATCH_PIDS` is treated as userspace-managed root state, while descendant tracking is delegated
   to the kernel-side `PROC_STATE`.
 - Runtime updates are modeled explicitly rather than letting gateway tasks mutate watch state
@@ -195,4 +198,5 @@ Use these files as entry points when changing behavior:
 - container behavior: `src/usecase/policy/watch_container.rs`
 - systemd behavior: `src/usecase/policy/watch_systemd_unit.rs`
 - runtime loop and presentation: `src/infra/runtime_loop.rs` and `src/infra/presentation/*.rs`
+- monitor spawning: `src/infra/runtime_monitors.rs`
 - eBPF userspace adapter: `src/gateway/ebpf.rs`

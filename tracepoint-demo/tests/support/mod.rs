@@ -8,6 +8,7 @@ use std::{
 
 use tokio::task::JoinHandle;
 
+use tracepoint_demo::infra::runtime_monitors::{ContainerMonitorSpawner, SystemdMonitorSpawner};
 use tracepoint_demo::integration::{
     BoxFuture, CgroupPort, ContainerRuntime, ContainerRuntimePort, ProcessSeedPort, RuntimeUpdate,
     SharedCgroupPort, SharedContainerRuntimePort, SharedSystemdRuntimePort, StatusReporter,
@@ -233,7 +234,9 @@ impl ContainerRuntimePort for ScriptedContainerRuntimePort {
             .unwrap_or_else(|| panic!("unexpected query_main_pid call for {name_or_id}"));
         boxed_future(result)
     }
+}
 
+impl ContainerMonitorSpawner for ScriptedContainerRuntimePort {
     fn spawn_monitor(
         &self,
         name_or_id: String,
@@ -317,7 +320,9 @@ impl SystemdRuntimePort for ScriptedSystemdRuntimePort {
             .unwrap_or_else(|| panic!("unexpected unit_pids call for {unit_name}"));
         boxed_future(result)
     }
+}
 
+impl SystemdMonitorSpawner for ScriptedSystemdRuntimePort {
     fn spawn_monitor(
         &self,
         unit_name: String,

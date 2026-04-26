@@ -5,9 +5,8 @@ use crate::{
     infra::{
         docker,
         presentation::{cli::CliArgs, output::ConsoleStatusReporter, wait::SignalAwareWaitPort},
-        runtime_loop, startup, systemd,
+        runtime_loop, runtime_monitors, startup, systemd,
     },
-    usecase::policy::trace_selected_targets,
 };
 
 pub async fn run() -> anyhow::Result<()> {
@@ -45,12 +44,19 @@ pub async fn run() -> anyhow::Result<()> {
     // The runtime loop has a single consumer and is already responsible for processing these
     // updates in order, so an unbounded `mpsc` is the simplest fit.
     let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel();
-    let has_monitors =
-        !trace_selected_targets::spawn_monitors(&prepared.state, &update_tx).is_empty();
+    let has_monitors = !runtime_monitors::spawn_monitors(
+        prepared.container_runtime.as_deref(),
+        &prepared.state.container_runtimes,
+        prepared.systemd_runtime.as_deref(),
+        &prepared.state.systemd_runtimes,
+        &update_tx,
+    )
+    .is_empty();
     drop(update_tx);
 
     runtime_loop::run(
         &mut prepared.ebpf,
+        &mut prepared.watch_pids,
         &mut prepared.state,
         &mut update_rx,
         runtime_loop::RuntimeLoopConfig {

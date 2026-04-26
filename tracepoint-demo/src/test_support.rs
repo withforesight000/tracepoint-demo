@@ -6,20 +6,13 @@ use std::{
 };
 
 use mockall::mock;
-use tokio::sync::mpsc;
 
-use crate::usecase::port::{
-    ContainerRuntimePort, RuntimeUpdate, SystemdRuntimePort, SystemdUnitRuntimeStatus,
-};
+use crate::usecase::port::{ContainerRuntimePort, SystemdRuntimePort, SystemdUnitRuntimeStatus};
 
 pub fn boxed_future<T: Send + 'static>(
     value: T,
 ) -> Pin<Box<dyn Future<Output = T> + Send + 'static>> {
     Box::pin(async move { value })
-}
-
-pub fn spawn_noop_handle() -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async {})
 }
 
 mock! {
@@ -66,16 +59,6 @@ impl ContainerRuntimePort for NoopContainerRuntimePort {
     ) -> crate::usecase::port::BoxFuture<'a, anyhow::Result<Option<u32>>> {
         boxed_future(Ok(None))
     }
-
-    fn spawn_monitor(
-        &self,
-        _name_or_id: String,
-        _all_processes: bool,
-        _tx: mpsc::UnboundedSender<RuntimeUpdate>,
-        _index: usize,
-    ) -> tokio::task::JoinHandle<()> {
-        spawn_noop_handle()
-    }
 }
 
 pub struct QueuedContainerRuntimePort {
@@ -98,16 +81,6 @@ impl ContainerRuntimePort for QueuedContainerRuntimePort {
         let next = self.pids.lock().unwrap().pop_front().unwrap_or(Ok(None));
         boxed_future(next)
     }
-
-    fn spawn_monitor(
-        &self,
-        _name_or_id: String,
-        _all_processes: bool,
-        _tx: mpsc::UnboundedSender<RuntimeUpdate>,
-        _index: usize,
-    ) -> tokio::task::JoinHandle<()> {
-        spawn_noop_handle()
-    }
 }
 
 pub struct NoopSystemdRuntimePort;
@@ -125,15 +98,6 @@ impl SystemdRuntimePort for NoopSystemdRuntimePort {
         _unit_name: &'a str,
     ) -> crate::usecase::port::BoxFuture<'a, anyhow::Result<Vec<u32>>> {
         boxed_future(Ok(Vec::new()))
-    }
-
-    fn spawn_monitor(
-        &self,
-        _unit_name: String,
-        _tx: mpsc::UnboundedSender<RuntimeUpdate>,
-        _index: usize,
-    ) -> tokio::task::JoinHandle<()> {
-        spawn_noop_handle()
     }
 }
 
@@ -181,15 +145,6 @@ impl SystemdRuntimePort for QueuedSystemdRuntimePort {
             Err(err) => Err(anyhow::anyhow!(err.to_string())),
         };
         boxed_future(result)
-    }
-
-    fn spawn_monitor(
-        &self,
-        _unit_name: String,
-        _tx: mpsc::UnboundedSender<RuntimeUpdate>,
-        _index: usize,
-    ) -> tokio::task::JoinHandle<()> {
-        spawn_noop_handle()
     }
 }
 

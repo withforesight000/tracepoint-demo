@@ -1,16 +1,23 @@
-use std::collections::{HashMap as StdHashMap, HashSet};
+use std::{
+    collections::{HashMap as StdHashMap, HashSet},
+    sync::Arc,
+};
 
 use aya::Ebpf;
 
 use tracepoint_demo_common::{PROC_FLAG_WATCH_CHILDREN, PROC_FLAG_WATCH_SELF};
 
 use crate::{
-    gateway::ebpf::{EbpfProcessSeedPort, build_watch_pids},
+    gateway::{
+        docker::DockerContainerRuntimeGateway,
+        ebpf::{EbpfProcessSeedPort, build_watch_pids},
+        systemd::SystemdRuntimeGateway,
+    },
     usecase::{
         orchestration::{
             startup_prepare::{StartupPrepareBackend, StartupPrepareInputs, prepare_runtime_plan},
             startup_runtime,
-            state::{AppState, PreparedApp, StartupWatchPidGroup},
+            state::{AppState, StartupWatchPidGroup},
             tty::normalize_tty_name,
             watch_roots::collect_watch_roots,
         },
@@ -27,16 +34,28 @@ use crate::{
 
 pub struct StartupResources {
     pub ebpf: Ebpf,
-    pub cgroup_port: SharedCgroupPort,
-    pub container_runtime: Option<SharedContainerRuntimePort>,
-    pub systemd_runtime: Option<SharedSystemdRuntimePort>,
+    pub cgroup_port: Arc<crate::gateway::procfs::ProcfsCgroupPort>,
+    pub container_runtime: Option<Arc<DockerContainerRuntimeGateway>>,
+    pub systemd_runtime: Option<Arc<SystemdRuntimeGateway>>,
+}
+
+pub struct PreparedApp {
+    pub ebpf: Ebpf,
+    pub watch_pids: aya::maps::hash_map::HashMap<aya::maps::MapData, u32, u32>,
+    pub state: AppState,
+    pub startup_watch_pid_groups: Vec<StartupWatchPidGroup>,
+    pub watch_children: bool,
+    pub all_container_processes: bool,
+    pub all_systemd_processes: bool,
+    pub container_runtime: Option<Arc<DockerContainerRuntimeGateway>>,
+    pub systemd_runtime: Option<Arc<SystemdRuntimeGateway>>,
 }
 
 struct StartupPrepareAdapter<'a, TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> {
     ebpf: &'a mut Ebpf,
-    cgroup_port: &'a SharedCgroupPort,
-    container_runtime: Option<&'a SharedContainerRuntimePort>,
-    systemd_runtime: Option<&'a SharedSystemdRuntimePort>,
+    cgroup_port: SharedCgroupPort,
+    container_runtime: Option<SharedContainerRuntimePort>,
+    systemd_runtime: Option<SharedSystemdRuntimePort>,
     reporter: &'a mut TReporter,
     wait_port: &'a mut TWait,
 }
@@ -78,12 +97,15 @@ impl<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> StartupPrepar
         all_container_processes: bool,
     ) -> anyhow::Result<Vec<Self::ContainerRuntime>> {
         let mut process_seed = EbpfProcessSeedPort::new(self.ebpf);
+        let runtime = self
+            .container_runtime
+            .as_ref()
+            .expect("container runtime should be available when initialization runs");
         startup_runtime::initialize_container_runtimes(
             &mut process_seed,
-            self.cgroup_port,
+            &self.cgroup_port,
             &mut *self.reporter,
-            self.container_runtime
-                .expect("container runtime should be available when initialization runs"),
+            runtime,
             containers,
             watch_children,
             all_container_processes,
@@ -98,12 +120,15 @@ impl<TReporter: StatusReporter + ?Sized, TWait: WaitPort + ?Sized> StartupPrepar
         all_systemd_processes: bool,
     ) -> anyhow::Result<Vec<Self::SystemdRuntime>> {
         let mut process_seed = EbpfProcessSeedPort::new(self.ebpf);
+        let runtime = self
+            .systemd_runtime
+            .as_ref()
+            .expect("systemd runtime should be available when initialization runs");
         startup_runtime::initialize_systemd_runtimes(
             &mut process_seed,
             &mut *self.reporter,
             &mut *self.wait_port,
-            self.systemd_runtime
-                .expect("systemd runtime should be available when initialization runs"),
+            runtime,
             systemd_units,
             watch_children,
             all_systemd_processes,
@@ -229,6 +254,17 @@ pub async fn prepare_prepared_app<TReporter: StatusReporter + ?Sized, TWait: Wai
     let mut ebpf = ebpf;
     let container_runtime_available = container_runtime.is_some();
     let systemd_runtime_available = systemd_runtime.is_some();
+    let cgroup_port: SharedCgroupPort = cgroup_port;
+    let container_runtime_for_prepare: Option<SharedContainerRuntimePort> =
+        container_runtime.as_ref().map(|runtime| {
+            let runtime: SharedContainerRuntimePort = runtime.clone();
+            runtime
+        });
+    let systemd_runtime_for_prepare: Option<SharedSystemdRuntimePort> =
+        systemd_runtime.as_ref().map(|runtime| {
+            let runtime: SharedSystemdRuntimePort = runtime.clone();
+            runtime
+        });
 
     let watch_flags = PROC_FLAG_WATCH_SELF
         | if watch_children {
@@ -238,9 +274,9 @@ pub async fn prepare_prepared_app<TReporter: StatusReporter + ?Sized, TWait: Wai
         };
     let mut prepare_adapter = StartupPrepareAdapter {
         ebpf: &mut ebpf,
-        cgroup_port: &cgroup_port,
-        container_runtime: container_runtime.as_ref(),
-        systemd_runtime: systemd_runtime.as_ref(),
+        cgroup_port,
+        container_runtime: container_runtime_for_prepare,
+        systemd_runtime: systemd_runtime_for_prepare,
         reporter,
         wait_port,
     };
@@ -277,18 +313,20 @@ pub async fn prepare_prepared_app<TReporter: StatusReporter + ?Sized, TWait: Wai
     let state = AppState {
         static_watch_roots: plan.static_watch_roots,
         current_watch_roots: plan.current_watch_roots,
-        watch_pids,
         container_runtimes: plan.container_runtimes,
         systemd_runtimes: plan.systemd_runtimes,
     };
 
     Ok(PreparedApp {
         ebpf,
+        watch_pids,
         state,
         startup_watch_pid_groups,
         watch_children,
         all_container_processes,
         all_systemd_processes,
+        container_runtime,
+        systemd_runtime,
     })
 }
 

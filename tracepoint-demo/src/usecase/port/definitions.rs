@@ -1,9 +1,5 @@
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
-use tokio::sync::mpsc;
-
-use crate::usecase::port::runtime_update::RuntimeUpdate;
-
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,14 +30,6 @@ pub trait ContainerRuntimePort: Send + Sync {
         &'a self,
         name_or_id: &'a str,
     ) -> BoxFuture<'a, anyhow::Result<Option<u32>>>;
-
-    fn spawn_monitor(
-        &self,
-        name_or_id: String,
-        all_processes: bool,
-        tx: mpsc::UnboundedSender<RuntimeUpdate>,
-        index: usize,
-    ) -> tokio::task::JoinHandle<()>;
 }
 
 pub trait SystemdRuntimePort: Send + Sync {
@@ -51,17 +39,16 @@ pub trait SystemdRuntimePort: Send + Sync {
     ) -> BoxFuture<'a, anyhow::Result<SystemdUnitRuntimeStatus>>;
 
     fn unit_pids<'a>(&'a self, unit_name: &'a str) -> BoxFuture<'a, anyhow::Result<Vec<u32>>>;
-
-    fn spawn_monitor(
-        &self,
-        unit_name: String,
-        tx: mpsc::UnboundedSender<RuntimeUpdate>,
-        index: usize,
-    ) -> tokio::task::JoinHandle<()>;
 }
 
 pub type SharedContainerRuntimePort = Arc<dyn ContainerRuntimePort>;
 pub type SharedSystemdRuntimePort = Arc<dyn SystemdRuntimePort>;
+
+pub trait WatchPidStore {
+    fn remove_watch_pid(&mut self, pid: u32) -> anyhow::Result<()>;
+
+    fn upsert_watch_pid(&mut self, pid: u32, flags: u32) -> anyhow::Result<()>;
+}
 
 pub trait StatusReporter {
     fn info(&mut self, message: String);

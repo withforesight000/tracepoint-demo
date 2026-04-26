@@ -12,9 +12,7 @@ pub use crate::usecase::orchestration::startup_runtime::{
     initialize_systemd_runtimes,
 };
 pub use crate::usecase::orchestration::state::StartupWatchPidGroup;
-pub use crate::usecase::orchestration::watch_roots::{
-    WatchPidStore, collect_watch_roots, sync_watch_pids,
-};
+pub use crate::usecase::orchestration::watch_roots::{collect_watch_roots, sync_watch_pids};
 pub use crate::usecase::policy::trace_selected_targets::TraceRequest;
 pub use crate::usecase::policy::watch_container::{
     ContainerRuntime, ContainerSeedSpec, apply_container_runtime_update,
@@ -26,5 +24,5 @@ pub use crate::usecase::policy::watch_systemd_unit::{
 pub use crate::usecase::port::{
     BoxFuture, CgroupPort, ContainerRuntimePort, ProcessSeedPort, RuntimeUpdate, SharedCgroupPort,
     SharedContainerRuntimePort, SharedSystemdRuntimePort, StatusReporter, SystemdRuntimePort,
-    SystemdUnitRuntimeStatus, WaitPort,
+    SystemdUnitRuntimeStatus, WaitPort, WatchPidStore,
 };

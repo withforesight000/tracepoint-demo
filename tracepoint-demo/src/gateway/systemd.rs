@@ -11,8 +11,7 @@ use zbus::zvariant::OwnedObjectPath;
 use zbus_systemd::systemd1::{ManagerProxy, ServiceProxy, UnitProxy};
 
 use crate::usecase::port::{
-    BoxFuture, RuntimeUpdate, SharedSystemdRuntimePort, SystemdRuntimePort,
-    SystemdUnitRuntimeStatus,
+    BoxFuture, RuntimeUpdate, SystemdRuntimePort, SystemdUnitRuntimeStatus,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,7 +42,7 @@ const SYSTEMD_ERROR_NO_SUCH_UNIT: &str = "org.freedesktop.systemd1.NoSuchUnit";
 const DBUS_ERROR_UNKNOWN_INTERFACE: &str = "org.freedesktop.DBus.Error.UnknownInterface";
 const DBUS_ERROR_UNKNOWN_PROPERTY: &str = "org.freedesktop.DBus.Error.UnknownProperty";
 
-struct SystemdRuntimeGateway {
+pub struct SystemdRuntimeGateway {
     conn: zbus::Connection,
 }
 
@@ -327,8 +326,10 @@ impl SystemdRuntimePort for SystemdRuntimeGateway {
     fn unit_pids<'a>(&'a self, unit_name: &'a str) -> BoxFuture<'a, anyhow::Result<Vec<u32>>> {
         Box::pin(async move { systemd_unit_pids(&self.conn, unit_name).await })
     }
+}
 
-    fn spawn_monitor(
+impl SystemdRuntimeGateway {
+    pub fn spawn_monitor(
         &self,
         unit_name: String,
         tx: mpsc::UnboundedSender<RuntimeUpdate>,
@@ -348,7 +349,7 @@ impl SystemdRuntimePort for SystemdRuntimeGateway {
     }
 }
 
-pub fn runtime_port(conn: zbus::Connection) -> SharedSystemdRuntimePort {
+pub fn runtime_port(conn: zbus::Connection) -> std::sync::Arc<SystemdRuntimeGateway> {
     Arc::new(SystemdRuntimeGateway { conn })
 }
 
