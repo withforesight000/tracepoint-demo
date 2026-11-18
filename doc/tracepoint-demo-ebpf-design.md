@@ -1,93 +1,62 @@
 # tracepoint-demo eBPF design
 
-## Scope
+`tracepoint-demo-ebpf` traces `execve` for watched processes. It follows forks, clears cached
+watch state at process exit, and supplies the task snapshot userspace needs at startup. The crate
+builds with `#![no_std]` and `#![no_main]`.
 
-This document describes the current design of the `tracepoint-demo-ebpf` crate and the shared ABI
-points it uses with userspace.
-
-For userspace orchestration, see `doc/tracepoint-demo-design.md`. For build and operational notes,
-see `README.md` and `doc/operations.md`.
-
-## Crate role
-
-The eBPF crate is responsible for:
-
-- tracing `sys_enter_execve`
-- inheriting watch state across `sched_process_fork`
-- clearing process watch state on `sched_process_exit`
-- exposing a task iterator used by userspace startup seeding
-
-It is built as `#![no_std]` and `#![no_main]`, and it relies on `tracepoint-demo-common` for
-shared event payloads, map names, and watch flags.
+See the [userspace design](tracepoint-demo-design.md) for startup and event handling, the
+[README](../README.md) for the build, and the [operations guide](operations.md) for runtime details.
 
 ## Shared ABI boundary
 
 `tracepoint-demo-common/src/lib.rs` defines the userspace/eBPF contract:
 
-- `ExecEvent`: event payload written into the ring buffer for each traced `execve`
-- `TaskRel`: `(pid, ppid, tty)` snapshot entry emitted by the task iterator
+- `ExecEvent`: record submitted to the `EXEC_EVENTS` ring buffer for a watched `execve` when space
+  is available
+- `TaskRel`: record from the task iterator with `pid`, `ppid`, and `tty_name`
 - `EXEC_EVENTS_MAP`, `WATCH_PIDS_MAP`, `PROC_STATE_MAP`: stable map names
 - `PROC_FLAG_WATCH_SELF`, `PROC_FLAG_WATCH_CHILDREN`: watch flag semantics
 
-Changes to any of those fields must be coordinated with userspace in the same change.
+Coordinate ABI changes across `tracepoint-demo-common`, the userspace daemon, and the eBPF crate.
 
-## Current module map
+## Kernel module map
 
 - `src/main.rs`: tracepoint entrypoints, task iterator entrypoint, panic handler, and license
 - `src/exec_trace.rs`: `sys_enter_execve` handling and `ExecEvent` population
 - `src/watch.rs`: watch lookup, lineage fallback, child inheritance, and `PROC_STATE` cleanup
 - `src/task_iter.rs`: task iterator output used for startup seeding in userspace
-- `src/kernel_read.rs`: verifier-friendly kernel field reads for `task_struct`, iterator context,
-  and TTY metadata
 - `src/maps.rs`: map declarations
 - `src/lib.rs`: pure helper logic with unit tests
-- `src/vmlinux.rs`: generated BTF bindings
+- `src/vmlinux.rs`: generated BTF bindings. Follow the
+  [regeneration procedure](operations.md#regenerating-btf-bindings) to update them.
 
 ## Programs
 
 ### `tracepoint_demo`
 
-Attached to `syscalls/sys_enter_execve`.
-
-This program:
-
-1. Reads the raw syscall context.
-2. Splits `pid_tgid` into process ID (`tgid`) and thread ID (`tid`).
-3. Resolves watch flags for the current process.
-4. Reserves a ring-buffer slot in `EXEC_EVENTS`.
-5. Populates `ExecEvent` with timestamps, credentials, command name, filename, and bounded `argv`
-   capture.
-
-If the current process is not watched, the program exits without emitting an event.
+At `syscalls/sys_enter_execve`, the program reads the syscall context and splits `pid_tgid` into
+the process ID (`tgid`) and thread ID (`tid`). It resolves watch flags using the process ID. For
+a watched process, if `EXEC_EVENTS` has room, it submits an `ExecEvent` with the kernel timestamp,
+credentials, syscall ID, command name, filename, and bounded `argv` capture.
 
 ### `on_fork`
 
-Attached to `sched/sched_process_fork`.
-
-This program copies watch state from the parent process into the child when
-`PROC_FLAG_WATCH_CHILDREN` is set. That keeps descendants visible without requiring userspace to
-write every forked PID into `WATCH_PIDS`.
+At `sched/sched_process_fork`, the program looks up the parent from the tracepoint payload in the
+watch maps. If the parent's flags enable `PROC_FLAG_WATCH_CHILDREN`, the program attempts to
+cache watch state for the child in `PROC_STATE`.
 
 ### `on_exit`
 
-Attached to `sched/sched_process_exit`.
-
-This program removes process-granularity state from `PROC_STATE`, but only when the exiting task is
-the thread-group leader. Non-leader thread exits do not clear shared watch state for the process.
+At `sched/sched_process_exit`, the program clears the entry in `PROC_STATE` only when the exiting
+thread is the thread-group leader.
 
 ### `iter_tasks`
 
-Exposed in the `iter/task` section.
-
-Userspace attaches this iterator during startup to obtain a point-in-time task snapshot. Each item
-contains:
-
-- `pid`
-- `ppid`
-- TTY name data when available
-
-Userspace uses that snapshot to seed roots from explicit PID and TTY selection and to expand child
-processes when watch-children mode is enabled.
+To seed watch state at startup, userspace attaches the program in the `iter/task` section to
+walk the current tasks. Each record gives the task's thread-group ID (`pid`), its real parent's thread-group ID
+(`ppid`, or zero if there is no real parent), and the TTY name when available. Userspace uses
+these records to seed PID and TTY roots and to find existing descendants when child watching
+is enabled.
 
 ## Watch-state model
 
@@ -101,34 +70,24 @@ The kernel-side watch logic is split across two maps:
 
 1. check `PROC_STATE`
 2. check `WATCH_PIDS`
-3. walk task lineage through `parent` and `real_parent`
+3. walk task lineage through `parent` and `real_parent`, up to `MAX_LINEAGE_DEPTH`
 
-When lineage resolution finds a watched ancestor with child watching enabled, the current process
-is inserted into `PROC_STATE` so later lookups are cheap.
+The lookup attempts to cache a hit from `WATCH_PIDS` in `PROC_STATE`. It also attempts to cache
+the current process there when the lineage walk finds a watched ancestor with child watching
+enabled.
 
 ## Exec event capture
 
-`exec_trace.rs` keeps capture bounded and verifier-friendly:
+`exec_trace.rs` zeroes the ring-buffer record before filling it. It reads the filename with
+`bpf_probe_read_user_str_bytes`. For `argv`, it copies the first five pointers, then reads the
+pointed-to strings until it reaches a null pointer or fills the five slots.
 
-- filename is read from the syscall argument pointer with `bpf_probe_read_user_str_bytes`
-- `argv` capture is limited to five slots
-- the pointer array is copied first, then dereferenced slot-by-slot until the first NULL entry
-- event memory is zeroed before population so missing fields stay deterministic
+## Kernel field reads
 
-This keeps the userspace output informative without making the tracepoint program unbounded.
-
-## Kernel-read helpers
-
-`kernel_read.rs` centralizes the raw pointer access needed by `watch.rs` and `task_iter.rs`.
-
-It wraps:
-
-- iterator metadata reads
-- `task_struct` field access such as `tgid`, `parent`, `real_parent`, and `signal`
-- TTY name extraction
-
-Keeping those helpers in one place keeps `unsafe` field walking local and makes the higher-level
-logic easier to review.
+`watch.rs` uses `bpf_probe_read_kernel` to read the task fields needed for the lineage walk. It
+uses the older `bpf_get_current_task` helper because some kernels reject
+`bpf_get_current_task_btf` for this program type. `task_iter.rs` reads the iterator context,
+task and parent IDs, and TTY metadata.
 
 ## Pure helper layer
 
@@ -139,18 +98,6 @@ logic easier to review.
 - checking whether watch flags propagate to children
 - lineage-matching and next-hop selection helpers
 
-This layer exists to keep the policy-like parts of watch resolution unit-testable.
-
-## Current design choices
-
-- Process identity is handled at process granularity with `tgid`, not per-thread `tid`, for watch
-  state and cleanup.
-- Lineage walks are depth-bounded with `MAX_LINEAGE_DEPTH`.
-- Older task helpers are preferred when they keep the tracepoint program loadable on more kernels.
-- Generated BTF bindings stay in `src/vmlinux.rs` and are regenerated, not hand-edited.
-- The crate stays small: entrypoints in `main.rs`, stateful logic in focused modules, pure helpers
-  in `lib.rs`.
-
 ## Change map
 
 Use these files as entry points when changing behavior:
@@ -158,6 +105,6 @@ Use these files as entry points when changing behavior:
 - event payload capture: `src/exec_trace.rs`
 - watch inheritance and cleanup: `src/watch.rs`
 - startup task snapshot behavior: `src/task_iter.rs`
-- kernel struct reads: `src/kernel_read.rs`
+- kernel struct reads: `src/watch.rs` and `src/task_iter.rs`
 - shared pure logic: `src/lib.rs`
 - ABI structs and flags: `tracepoint-demo-common/src/lib.rs`

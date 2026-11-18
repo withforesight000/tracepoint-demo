@@ -7,36 +7,26 @@ description: Canonical layered-architecture guidance for tracepoint-demo. Use wh
 
 Use this skill when editing the userspace daemon or deciding where new logic should live.
 
-## Canonical paths
+The [Copilot shim](../../../.github/skills/tracepoint-demo-layered-architecture/SKILL.md)
+points here.
 
-- Canonical skill: `.agents/skills/tracepoint-demo-layered-architecture/SKILL.md`
-- Copilot compatibility shim: `.github/skills/tracepoint-demo-layered-architecture/SKILL.md`
-- Portable summary: `docs/ai-guidance.md`
+## Layer responsibilities
 
-## Core model
+| Location | What belongs here |
+| --- | --- |
+| `main.rs` | Process entry point. Delegate startup to bootstrap. |
+| `infra/` | Parse CLI arguments, set up dependencies, wire startup and the runtime loop, adapt waits, and print output. |
+| `usecase/` | Decide what to watch, when to retry, and how to merge watch state. Define the ports and DTOs the policy needs. |
+| `gateway/` | Implement the ports for eBPF, procfs/cgroup, Docker, and systemd. |
 
-- `main.rs` stays tiny and acts as the entry point into bootstrap.
-- `infra/` owns composition, initialization, CLI mapping, user-facing output, wait adapters, and runtime-loop wiring.
-- `gateway/` owns concrete I/O against eBPF, procfs/cgroup, Docker, and systemd.
-- `usecase/` owns user intent, watch-policy decisions, and usecase-internal orchestration.
-
-The dependency direction is one way:
-
-- `usecase` defines contracts and DTOs.
-- `gateway` implements those contracts with concrete systems.
-- `infra` composes everything and handles the outer user-facing edges.
-
-## Decision rules
-
-- What should we watch, retry, or merge? Put it in `usecase/`.
-- How do we talk to Docker, systemd, procfs, or eBPF? Put it in `gateway/`.
-- How do we parse CLI input, print output, or wire startup and the runtime loop? Put it in `infra/`.
+Production dependencies point inward. `infra` assembles `usecase` and `gateway`, and `gateway`
+implements ports defined in `usecase`. Keep `usecase` independent of concrete adapters.
 
 ## Ports and seams
 
-- Define ports in `usecase/` when an inner layer needs an abstraction over an outer dependency.
+- Define a port in `usecase/` when policy needs to call an external system through an abstraction.
 - Keep request DTOs with the port or usecase that consumes them.
-- Avoid introducing a trait that merely renames a concrete type or a thin wrapper with no architectural benefit.
+- Introduce a trait when callers need an abstraction over the concrete dependency.
 
 ## Guardrails
 
@@ -45,14 +35,13 @@ The dependency direction is one way:
 - Keep `println!`, `eprintln!`, and signal handling at the presentation edge in `infra/presentation/`.
 - Keep protocol-specific monitoring machinery such as Docker event streams, polling loops, and D-Bus subscriptions in `gateway/`.
 - Keep presentation formatting out of `gateway/`.
-- Keep `usecase/orchestration/` focused on internal step decomposition and primitive/current state, not whole-program initialization.
+- Keep usecase steps and their state in `usecase/orchestration/`. Initialize the program in `infra/`.
 - Map CLI types to usecase request DTOs in `infra/presentation/` before entering `usecase/`.
 
 ## Change workflow
 
 - If behavior changes, update `README.md` for user-facing behavior and `doc/design.md` for architecture notes.
-- If the change affects ownership boundaries or dependency direction, check this skill first and keep the code aligned with it.
-- If the task is clearly about startup wiring, look in `tracepoint-demo/src/infra/bootstrap.rs` and `tracepoint-demo/src/infra/startup.rs` before moving logic elsewhere.
+- For startup wiring, start with `tracepoint-demo/src/infra/bootstrap.rs` and `tracepoint-demo/src/infra/startup.rs`.
 
 ## File lookup shortcuts
 

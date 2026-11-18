@@ -1,45 +1,28 @@
 # tracepoint-demo userspace design
 
-## Scope
+`tracepoint-demo` turns a CLI tracing request into watch roots, loads the embedded eBPF programs,
+and prints the events they send. It starts Docker or systemd monitors when the request includes
+those targets.
 
-This document describes the current design of the `tracepoint-demo` userspace crate. It focuses on
-what the daemon does today, how responsibilities are split across layers, and which modules own the
-main runtime flows.
-
-For build, runtime examples, and operational details, see `README.md` and `doc/operations.md`.
-
-## Crate role
-
-The userspace daemon is responsible for:
-
-- parsing CLI inputs into a tracing request
-- loading and attaching the embedded eBPF programs
-- seeding the initial watch state from explicit PID and TTY inputs
-- initializing Docker and systemd runtimes when those targets are requested
-- spawning runtime monitors for container and systemd target updates
-- draining the eBPF ring buffer and rendering `execve` events
-
-`tracepoint-demo-common` is the ABI boundary to the kernel-side crate. The userspace crate treats
-`ExecEvent`, `TaskRel`, map names, and watch flags as shared contract points.
+`tracepoint-demo-common` defines the shared ABI, including `ExecEvent`, `TaskRel`, map names, and
+watch flags. See the [eBPF design](tracepoint-demo-ebpf-design.md) for the kernel side, the
+[README](../README.md) for build commands, and the [operations guide](operations.md) for examples.
 
 ## Layering
 
-The userspace crate follows the repository's layered-architecture rules:
-
 - `main.rs`: tiny entry point that initializes logging and delegates to bootstrap
-- `infra/`: outer adapters and composition, including CLI parsing, dependency setup, startup
-  wiring, runtime-loop control, and console output
+- `infra/`: CLI parsing, dependency setup, startup wiring, and runtime-loop control.
+  `infra/presentation/` formats console output.
 - `usecase/`: user-intent flows, watch-policy decisions, startup preparation, and runtime-state
   coordination
 - `gateway/`: concrete I/O against eBPF, procfs/cgroup, Docker, and systemd
 
-Dependency direction is one-way:
+The `usecase` layer defines ports and data transfer objects. The `gateway` layer implements
+those ports for external systems, and `infra` assembles the concrete dependencies for the daemon.
+The [layered architecture skill](../.agents/skills/tracepoint-demo-layered-architecture/SKILL.md)
+defines the dependency rules.
 
-- `usecase` defines ports and depends only on abstractions and DTOs
-- `gateway` implements those ports with concrete external systems
-- `infra` composes concrete dependencies and connects them to the runtime
-
-## Current module map
+## Userspace module map
 
 ### Entry and composition
 
@@ -104,16 +87,10 @@ Dependency direction is one-way:
 
 ### 3. Startup preparation
 
-`infra/startup.rs` bridges concrete resources to usecase logic.
-
-Its main responsibilities are:
-
-- normalize TTY filters
-- compute watch flags from `watch_children`
-- adapt concrete resources into the `StartupPrepareBackend` interface
-- collect startup watch groups for the banner
-- build `PreparedApp`, which contains the loaded `Ebpf`, `AppState`, startup banner data, and the
-  effective watch-mode flags
+`infra/startup.rs` normalizes the TTY filters and computes flags from `watch_children`. It
+adapts the concrete resources to `StartupPrepareBackend`, then groups the selected PIDs for the
+startup banner. It returns `PreparedApp` with the loaded `Ebpf`, `AppState`, banner data, and
+effective watch-mode flags.
 
 ### 4. Usecase startup logic
 
@@ -121,10 +98,11 @@ Its main responsibilities are:
 be watched:
 
 - static PID and TTY roots are seeded from the eBPF task iterator
-- missing PID and TTY targets are retried through the wait port when there are no runtime targets
+- if there are no runtime targets and the first lookup finds no PID or TTY roots, retry through
+  the wait port
 - container runtimes query the current main PID and optionally seed all container processes
-- systemd runtimes query current status and can seed `MainPID` plus unit processes before the unit
-  becomes fully active
+- for systemd, seed a usable `MainPID` even before the unit is active. In all-processes mode,
+  also query unit processes. A running unit can supply those processes without a `MainPID`.
 
 `usecase/orchestration/watch_roots.rs` then merges static roots, container roots, and systemd
 roots into the current `WATCH_PIDS` map contents.
@@ -144,9 +122,7 @@ banner in grouped form.
 
 ## Port model
 
-The usecase layer defines ports under `src/usecase/port/`.
-
-Important contracts are:
+The usecase layer defines these ports under `src/usecase/port/`.
 
 - `ProcessSeedPort`: seed watch state from the task iterator or by direct PID insertion
 - `ContainerRuntimePort`: resolve container main PIDs and spawn monitor tasks
@@ -155,34 +131,18 @@ Important contracts are:
 - `StatusReporter`: emit startup and runtime notices
 - `WaitPort`: wait during startup retry loops with interrupt awareness
 
-This keeps policy decisions in `usecase/` while the concrete Docker, systemd, procfs, and eBPF
-implementations remain in `gateway/` and `infra/`.
-
 ## Runtime loop
 
 `infra/runtime_loop.rs` owns the live daemon loop after startup.
 
 - It prints the startup banner from `StartupWatchPidGroup`.
 - It drains the `EXEC_EVENTS` ring buffer and prints each `ExecEvent`.
-- If container or systemd monitors are running, it also receives `RuntimeUpdate` messages from an
-  unbounded Tokio channel.
-- Runtime updates are applied through `infra/presentation/runtime_updates.rs`, which updates
-  `AppState`, synchronizes `WATCH_PIDS`, and emits transition notices.
+- If Docker or systemd monitors are running, it receives their `RuntimeUpdate` messages over an
+  unbounded Tokio channel. `infra/presentation/runtime_updates.rs` calls the usecase handlers
+  to update `AppState`, synchronizes `WATCH_PIDS`, and reports transitions.
 - `Ctrl-C` prints a shutdown message and exits cleanly.
 
-The runtime loop does not own target-selection policy. It owns event delivery and orchestration of
-already-established runtime state.
-
-## Current design choices
-
-- The composition root stays in `infra/bootstrap.rs`; `main.rs` remains intentionally tiny.
-- Startup preparation is split so `infra/` handles concrete resource ownership and `usecase/`
-  decides watch behavior.
-- `WATCH_PIDS` is treated as userspace-managed root state, while descendant tracking is delegated
-  to the kernel-side `PROC_STATE`.
-- Runtime updates are modeled explicitly rather than letting gateway tasks mutate watch state
-  directly.
-- Presentation formatting stays in `infra/presentation/`, not in `gateway/` or `usecase/`.
+Userspace keeps roots in `WATCH_PIDS`, and the eBPF programs track descendants in `PROC_STATE`.
 
 ## Change map
 

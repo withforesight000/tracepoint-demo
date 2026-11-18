@@ -1,21 +1,22 @@
 # AGENTS.md
 
-This file is a guide for AI agents operating on this repository.
-
 ## Read first
 
-- `README.md` for user-facing behavior, build, run, and output examples.
-- `.agents/skills/tracepoint-demo-layered-architecture/SKILL.md` for the canonical layered-architecture rules and change-location shortcuts.
-- `.agents/skills/tracepoint-demo-ebpf-implementation/SKILL.md` for kernel-side implementation rules, shared ABI guardrails, and change-location shortcuts inside `tracepoint-demo-ebpf/`.
-- `.github/skills/tracepoint-demo-layered-architecture/SKILL.md` only for Copilot compatibility if the agent does not scan `.agents/skills`.
-- `.github/skills/tracepoint-demo-ebpf-implementation/SKILL.md` only for Copilot compatibility if the agent does not scan `.agents/skills`.
-- `doc/design.md` when you need architectural rationale, file mapping, or the runtime interaction trace.
+- [README](README.md) covers usage, target combinations, builds, and example output.
+- The [layered architecture skill](.agents/skills/tracepoint-demo-layered-architecture/SKILL.md)
+  defines layer ownership, dependency rules, and where to make changes.
+- The [eBPF implementation skill](.agents/skills/tracepoint-demo-ebpf-implementation/SKILL.md)
+  covers kernel code, the shared ABI, and where to make changes in `tracepoint-demo-ebpf/`.
+- [Design notes](doc/design.md) link to the rationale, module maps, and runtime flow.
+
+Use the [layered architecture](.github/skills/tracepoint-demo-layered-architecture/SKILL.md) and
+[eBPF implementation](.github/skills/tracepoint-demo-ebpf-implementation/SKILL.md) Copilot shims
+only if your agent cannot discover skills under `.agents/skills`.
 
 ## Project overview
 
-`tracepoint-demo` is an eBPF tracing daemon in Rust using Aya. It attaches to `sys_enter_execve`
-and reports `execve` calls for a configurable set of processes.
-Targets can be selected by PID, TTY, Docker container, or systemd unit.
+`tracepoint-demo` is a Rust daemon that uses Aya to attach to `sys_enter_execve`. It reports
+`execve` calls for processes selected by PID, TTY, Docker container, or systemd unit.
 
 ## Repository layout
 
@@ -25,22 +26,13 @@ Targets can be selected by PID, TTY, Docker container, or systemd unit.
 
 ## Working rules
 
-- Keep `tracepoint-demo/src/main.rs` as a composition root.
+- Keep `tracepoint-demo/src/main.rs` as a small entry point. Compose dependencies in
+  `infra/bootstrap.rs`.
 - Keep CLI parsing, startup/composition, output formatting, runtime-loop wiring, and concrete client initialization in `infra/`.
 - Keep user-intent flows and watch-state coordination in `usecase/`.
 - Keep eBPF, procfs/cgroup, Docker, and systemd I/O in `gateway/`.
 - Treat `tracepoint-demo-common` as the ABI boundary between userspace and eBPF.
 - If code behavior changes, update `README.md` for users and `doc/design.md` for architecture notes in the same change.
-- For dependency-direction and ownership questions, follow `.agents/skills/tracepoint-demo-layered-architecture/SKILL.md`.
-- For kernel-side implementation questions, follow `.agents/skills/tracepoint-demo-ebpf-implementation/SKILL.md`.
-
-## Architecture guardrails
-
-- See `.agents/skills/tracepoint-demo-layered-architecture/SKILL.md`.
-
-## Architecture smell checks
-
-- See `.agents/skills/tracepoint-demo-layered-architecture/SKILL.md`.
 
 ## Shared types and maps
 
@@ -53,6 +45,16 @@ Targets can be selected by PID, TTY, Docker container, or systemd unit.
 
 ## Build and verification
 
+Install nightly with `rust-src` before building `tracepoint-demo` locally or in CI. The userspace
+build uses it to compile the embedded eBPF program.
+
+```bash
+rustup toolchain install nightly --profile minimal --component rust-src
+```
+
+Run the workspace build and checks on Linux for the host target. `tracepoint-demo/build.rs` builds the
+embedded `bpfel-unknown-none` target from source via `aya-build` and `build-std`.
+
 ```bash
 cargo build --release
 cargo clippy --all-targets
@@ -60,21 +62,11 @@ cargo fmt --check
 cargo test
 ```
 
-For local or CI builds of `tracepoint-demo`, install nightly with `rust-src` for the embedded
-eBPF build step:
-
-```bash
-rustup toolchain install nightly --profile minimal --component rust-src
-```
-
-Do not add `--target bpfel-unknown-none`; `tracepoint-demo/build.rs` builds that target from
-source via `aya-build` and `build-std`.
-
 ## Tests and coverage (recommended)
 
-- When behavior changes, add tests for edge cases and transitional states, not only straight-line
-  success paths. Prefer scenario/integration tests for easy-to-miss cases such as runtime target
-  restarts, pre-active `MainPID` updates, and other unusual but important monitor sequences.
+When behavior changes, cover edge cases and state transitions. Prefer scenario or integration tests
+for monitor sequences such as a runtime target restart or a `MainPID` update before a unit becomes
+active.
 
 Unit tests and lints:
 
@@ -92,10 +84,6 @@ cargo tarpaulin --skip-clean --lib \
   --exclude-files tracepoint-demo-ebpf/src/vmlinux.rs --out Stdout
 ```
 
-## eBPF constraints
-
-- See `.agents/skills/tracepoint-demo-ebpf-implementation/SKILL.md`.
-
 ## BTF bindings
 
 When the traced kernel types change or the target kernel changes, regenerate `tracepoint-demo-ebpf/src/vmlinux.rs`:
@@ -104,7 +92,3 @@ When the traced kernel types change or the target kernel changes, regenerate `tr
 cd tracepoint-demo-ebpf
 aya-tool generate trace_event_raw_sys_enter trace_event_raw_sched_process_fork task_struct bpf_iter_meta bpf_iter__task > src/vmlinux.rs
 ```
-
-## Runtime notes
-
-- Use `README.md` for run examples and target-combination rules.

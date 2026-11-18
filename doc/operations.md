@@ -1,59 +1,73 @@
 # tracepoint-demo operations
 
-This note collects runtime and maintenance details that are too specific for `README.md`.
+See the [README](../README.md) for installation and a first run.
 
 ## Build and toolchain
 
-`tracepoint-demo/build.rs` uses `aya-build` to compile the embedded eBPF crate before the userspace
-binary. The build path currently runs the eBPF crate through the nightly toolchain because
-`aya-build` defaults to nightly for `build-std`-based eBPF compilation. Local builds and CI
-therefore need the nightly toolchain with `rust-src` installed in addition to stable Rust. A
-separate `bpfel-unknown-none` rustup target is not required.
+Install stable Rust for the daemon and nightly Rust with `rust-src` for the embedded eBPF
+programs. In local builds and CI, `tracepoint-demo/build.rs` calls `aya-build` to compile the
+eBPF crate with nightly and `build-std`. A separate `bpfel-unknown-none` rustup target is
+unnecessary.
 
 ## Target selection
 
-- PID inputs and TTY filters are additive. You can combine repeated `-p/--pid` arguments and
-  `--tty` in the same invocation, and you can also mix them with container or systemd targets.
-- Container and systemd targets can be combined in the same invocation.
-- `--no-watch-children` limits tracing to the selected roots.
-- `--all-container-processes` and `--all-systemd-processes` override `--no-watch-children` for
-  their respective seeds.
+Combine repeated `-p` or `--pid` options with `--tty`, `--container`, or `--systemd-unit` in the
+same invocation. Docker and systemd targets can also run together. TTY filters accept paths such as
+`/dev/pts/9` and names such as `pts9`.
 
-## Startup behavior
+By default, tracing follows descendants. `--no-watch-children` limits tracing to the selected
+roots. `--all-container-processes` and `--all-systemd-processes` override that limit for their
+respective targets.
 
-- PID and TTY targets wait and retry until matching roots appear.
-- Containers wait until they are running.
-- If Docker reports a running container with an invalid or missing PID, the daemon defers and
-  retries instead of aborting startup.
-- Systemd units do not block startup; the daemon starts monitoring immediately and picks up
-  `MainPID` transitions even before the unit reports `active`.
-- `--all-systemd-processes` and `--all-container-processes` seed the runtime target's current PID
-  list at startup, and the startup banner folds those resolved PIDs into the main grouped
-  `PIDs:` list.
-- Startup banner segments are grouped by source. Explicit `-p/--pid` inputs appear as
-  `pid:(pid=1111, 2222)`, TTY roots appear as `tty:/dev/pts/3:(pid=3333, 3334)`, and runtime
-  targets keep their source labels such as `container:my-service:(main=1234)` or
-  `systemd:sshd.service:(main=5678, pid=6789)`.
-- `--all-container-processes` and `--all-systemd-processes` appear in the banner suffix as
-  `(all-container-processes=on)` and `(all-systemd-processes=on)` when enabled.
-- Container and systemd targets refresh their main PID while the daemon is running.
-- Container and systemd targets print runtime state-change notices, including resolved replacement
-  PIDs after restarts or recreation.
-- For systemd targets, runtime monitoring also covers services started after `tracepoint-demo`
-  itself, so the unit's early startup `execve` activity is still traced once systemd exposes a
-  `MainPID`.
-- `--all-container-processes` also refreshes container state when Docker reports exec activity
-  inside the container. A fast cgroup probe seeds the new exec pid, and child commands launched
-  from that shell inherit watch state at exec time, so direct `docker exec`, `docker compose exec`,
-  and later commands from that shell are picked up. The watch cache is kept at process granularity,
-  so helper-thread exits during the `docker exec` handoff do not drop that shell state.
-- Shell builtins such as `cd`, `pwd`, and `echo` do not emit traces because they do not make an
-  `execve` syscall. External commands launched from the shell do.
-- TTY input accepts `/dev/` paths and normalized PTY names such as `pts9`.
+## When tracing starts
+
+The daemon looks for PID and TTY roots at startup. If those are the only targets and the first
+lookup finds no roots, it retries until a match appears.
+
+The daemon seeds containers whose main PIDs are available at startup. If a container is stopped or
+Docker reports a running container without a valid PID, tracing that container waits for a valid
+PID. The monitor retries while the daemon runs.
+
+The daemon starts without waiting for systemd units to become active. It can start tracing a unit
+as soon as systemd exposes a usable `MainPID`, including during activation.
+
+With `--all-container-processes`, the daemon seeds the current container processes when it has a
+valid main PID. With `--all-systemd-processes`, it can also seed a running unit's processes
+when the unit has no `MainPID`.
+
+## What changes while tracing
+
+Container and systemd monitors refresh the main PID and report state changes, including replacement
+PIDs after a restart or recreation.
+
+With `--all-container-processes`, the Docker monitor looks for new processes from `docker exec`
+and `docker compose exec`. It probes the container cgroup on `exec_create` and asks Docker for the
+exec PID on `exec_start` when the event supplies an exec ID. The first `execve` can happen before
+the daemon seeds that PID. Commands launched from a watched shell can inherit its watch state,
+which persists when a helper thread exits during the handoff.
+
+Shell builtins such as `cd`, `pwd`, and `echo` do not call `execve` and produce no trace.
+External commands launched from the shell do call `execve`.
+
+## Startup banner
+
+When the banner has a `PIDs:` list, it shows explicit PID inputs as supplied and groups resolved
+TTY, Docker, and systemd PIDs by target. With either all-processes option, seeded PIDs appear in
+the corresponding runtime group.
+
+| Source | Example |
+| --- | --- |
+| Explicit PIDs | `pid:(pid=1111, 2222)` |
+| TTY | `tty:/dev/pts/3:(pid=3333, 3334)` |
+| Docker | `container:my-service:(main=1234)` |
+| systemd | `systemd:sshd.service:(main=5678, pid=6789)` |
+
+The banner adds `(all-container-processes=on)` and `(all-systemd-processes=on)` when the
+corresponding options are enabled.
 
 ## Output and logging
 
-Each line of output looks like:
+An exec event produces a line like this.
 
 ```text
 [0.123456] pid=1234 tid=1234 uid=1000 gid=1000 syscall_id=59 comm="bash" filename="/usr/bin/bash" argv="bash -lc ls -la"
@@ -62,8 +76,9 @@ Each line of output looks like:
 `pid` is the thread-group ID, which most tools display as the process ID. `tid` is the kernel
 thread ID.
 
-`argv` includes the first five captured `execve` arguments, so flag sequences such as `ls -la`
-stay visible in the trace output.
+`argv` shows up to the first five entries in the `execve` argument vector, including `argv[0]`.
+It joins the nonempty entries with spaces. The example captures `ls -la` as part of a shell
+command.
 
 Set `RUST_LOG=tracepoint_demo=debug` to show the binary's debug logs.
 
@@ -88,23 +103,28 @@ cargo tarpaulin --skip-clean --lib \
   --exclude-files tracepoint-demo-ebpf/src/vmlinux.rs --out Stdout
 ```
 
-To catch eBPF verifier regressions, run the optional smoke test on a kernel that can load the
-programs:
+### eBPF verifier smoke test
+
+Build the smoke test on the Linux host whose kernel you want to check.
 
 ```bash
-TRACEPOINT_DEMO_EBPF_SMOKE_TEST=1 sudo cargo test -p tracepoint-demo --test ebpf_verifier_smoke
+cargo test -p tracepoint-demo --test ebpf_verifier_smoke --no-run
 ```
 
-This exercises the real `program.load()` path, so any verifier rejection will surface there rather
-than only at daemon startup.
+Copy the executable path from Cargo's output. Substitute it for the placeholder below.
 
-This is a manual check and is not part of GitHub Actions CI.
+```bash
+sudo env TRACEPOINT_DEMO_EBPF_SMOKE_TEST=1 /path/to/ebpf_verifier_smoke --nocapture
+```
+
+The test calls `program.load()` and surfaces verifier rejections. Run this load check manually.
+GitHub Actions CI runs the tests without enabling the smoke check.
 
 ## Regenerating BTF bindings
 
 `tracepoint-demo-ebpf/src/vmlinux.rs` contains the Aya-generated BTF definitions that the BPF
 programs depend on. Regenerate them when the traced kernel types change or when you build against a
-different kernel:
+different kernel.
 
 ```bash
 cd tracepoint-demo-ebpf
@@ -113,8 +133,8 @@ aya-tool generate trace_event_raw_sys_enter trace_event_raw_sched_process_fork t
 
 ## Releases
 
-Releases are cut from git tags. Push a semver tag such as `0.1.0`; the CI workflow runs first, and
-if it succeeds it dispatches the GitHub release workflow:
+Push a tag in `major.minor.patch` format to start CI. If CI passes and GitHub has no release for
+the tag, CI dispatches the release workflow.
 
 ```bash
 git tag 0.1.0
@@ -124,8 +144,10 @@ git push origin 0.1.0
 The release workflow builds Linux artifacts for `x86_64-unknown-linux-gnu` and
 `aarch64-unknown-linux-gnu` on GitHub-hosted Ubuntu 22.04 runners, then publishes them to GitHub
 Releases. That baseline keeps the binaries usable on machines with older glibc than an Ubuntu
-24.04 build would require. If you need to rerun the release step directly, the workflow is also
-available as a manual `workflow_dispatch` with a `tag` input.
+24.04 build would require.
 
-Release notes are generated from `CHANGELOG.md`. The 0.1.0 entry is intentionally labeled
-`Initial Release`, and later releases can add version-specific notes under the matching heading.
+For a manual release via `workflow_dispatch`, select the release tag as the workflow ref and pass
+the same value in the `tag` input.
+
+Release notes come from [CHANGELOG.md](../CHANGELOG.md). The 0.1.0 entry is titled
+`Initial Release`. Add notes for later releases under the corresponding version heading.

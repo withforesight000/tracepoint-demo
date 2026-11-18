@@ -7,20 +7,17 @@ description: Implementation guidance for tracepoint-demo-ebpf. Use when editing 
 
 Use this skill when editing `tracepoint-demo-ebpf/` or changing the ABI between eBPF and userspace.
 
-## Canonical paths
+The [Copilot shim](../../../.github/skills/tracepoint-demo-ebpf-implementation/SKILL.md)
+points here. See the [README](../../../README.md) for usage and the
+[design notes](../../../doc/design.md) for the runtime flow.
 
-- Canonical skill: `.agents/skills/tracepoint-demo-ebpf-implementation/SKILL.md`
-- Copilot compatibility shim: `.github/skills/tracepoint-demo-ebpf-implementation/SKILL.md`
-- User-facing behavior and run expectations: `README.md`
-- Userspace architecture notes and runtime trace: `doc/design.md`
+## Crate boundary
 
-## Core model
+Keep `tracepoint-demo-ebpf` as `#![no_std]` and `#![no_main]`. Put shared structs, map names, and
+watch flags in `tracepoint-demo-common`, the ABI boundary between userspace and the kernel programs.
+Keep the entry points in `main.rs` and give each implementation module one responsibility.
 
-- `tracepoint-demo-ebpf` is the kernel-side crate. Keep it `#![no_std]` and `#![no_main]`.
-- `tracepoint-demo-common` is the ABI boundary. Shared structs, map names, and watch flags belong there.
-- The eBPF crate is intentionally small and pragmatic. Prefer a few focused files over reintroducing one large `main.rs`.
-
-## Module ownership
+## Module ownership in `tracepoint-demo-ebpf/`
 
 - `src/main.rs`: program entrypoints only. Keep `tracepoint`, `iter/task`, panic handler, and license here.
 - `src/maps.rs`: BPF map declarations only.
@@ -32,12 +29,11 @@ Use this skill when editing `tracepoint-demo-ebpf/` or changing the ABI between 
 
 ## Guardrails
 
-- Treat process identity at process granularity. Use `tgid` for PID-level watch state and task iterator output, not per-thread `tid`.
-- Keep `PROC_STATE` semantics consistent with that process granularity. Cleanup logic must not drop state on non-leader thread exit.
-- Keep loops verifier-friendly: bounded, simple, and with explicit depth caps.
+- Use `tgid` for process watch state and task iterator output. In `PROC_STATE`, retain the process entry when a non-leader thread exits.
+- Use simple, bounded loops with explicit depth limits for the verifier.
 - Keep kernel-side code allocation-free and stack-aware. Reuse per-CPU buffers for larger temporary arrays such as pathname capture.
-- Keep `unsafe` blocks tight and local. If a pointer walk or helper call can be isolated, isolate it.
-- Do not rename maps or shared flags casually. `WATCH_PIDS`, `PROC_STATE`, `ExecEvent`, `TaskRel`, and the watch flags are userspace/eBPF contract points.
+- Limit each `unsafe` block to the pointer walk or helper call that needs it.
+- Treat `WATCH_PIDS`, `PROC_STATE`, `ExecEvent`, `TaskRel`, and the watch flags as ABI contracts.
 - Prefer extracting pure decision logic into `src/lib.rs` when it can be tested outside the eBPF runtime.
 
 ## Change rules
@@ -45,7 +41,8 @@ Use this skill when editing `tracepoint-demo-ebpf/` or changing the ABI between 
 - If you change event payloads, map names, or watch-flag meanings, update `tracepoint-demo-common/` in the same change.
 - If behavior visible to users changes, update `README.md` and `doc/design.md` in the same change.
 - If kernel type usage changes, regenerate `tracepoint-demo-ebpf/src/vmlinux.rs` rather than editing it manually.
-- Keep userspace assumptions in mind: container exec tracing depends on `PROC_STATE` inheriting watch flags correctly across fork/exec and on process-granularity cleanup.
+- Container exec tracing depends on `PROC_STATE` retaining inherited watch flags across fork and
+  exec. Clear entries at process granularity.
 
 ## BTF bindings
 

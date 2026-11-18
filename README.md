@@ -1,17 +1,15 @@
 # tracepoint-demo
 
-`tracepoint-demo` is a Rust + Aya workspace that traces `sys_enter_execve` and prints `execve`
-activity for selected processes.
+`tracepoint-demo` is a Linux daemon built with Rust and Aya. It hooks `sys_enter_execve` to print
+`execve` activity for processes selected by PID, TTY, Docker container, or systemd unit.
 
-## Project Layout
+## Workspace and documentation
 
 - `tracepoint-demo/`: userspace daemon
 - `tracepoint-demo-ebpf/`: kernel eBPF programs
 - `tracepoint-demo-common/`: shared wire types and constants
-- `doc/design.md`: design-document index
-- `doc/tracepoint-demo-design.md`: userspace daemon design
-- `doc/tracepoint-demo-ebpf-design.md`: eBPF-side design
-- `doc/operations.md`: runtime behavior, build notes, and other detailed usage notes
+- [Design index](doc/design.md) links to the userspace and eBPF architecture notes.
+- [Operations guide](doc/operations.md) covers target selection, output, troubleshooting, and releases.
 
 ## Requirements
 
@@ -30,8 +28,8 @@ cargo install --locked bpf-linker
 cargo install --locked aya-tool
 ```
 
-You do not need `rustup target add bpfel-unknown-none`; `tracepoint-demo/build.rs` builds the
-embedded eBPF crate through `aya-build`.
+`tracepoint-demo/build.rs` builds the embedded eBPF crate through `aya-build`. A separate
+`rustup target add bpfel-unknown-none` step is unnecessary.
 
 Running the daemon requires root privileges or capabilities such as `CAP_BPF`, `CAP_PERFMON`, and
 `CAP_SYS_RESOURCE`.
@@ -50,19 +48,14 @@ sudo cargo run --release -- --container my-service
 sudo cargo run --release -- --systemd-unit sshd.service
 ```
 
-PID targets must be passed with repeated `-p/--pid` arguments; bare positional PIDs are not
-supported.
+Pass each PID with its own `-p` or `--pid` option. Each event line shows the process ID as
+`pid=` and the thread ID as `tid=`. See the [operations guide](doc/operations.md) for combinations
+of targets, startup behavior, output, and logging.
 
-See `doc/operations.md` for target-selection rules, startup behavior, output format, logging, and
-more examples.
-
-Exec lines label the process ID as `pid=` and the thread ID as `tid=` so multithreaded execs
-stay unambiguous.
-
-If the daemon fails to load the eBPF program with a kernel verifier error on your machine, Aya's
-CO-RE (Compile Once - Run Everywhere) support may not be sufficient for that kernel/BTF combination. In that case, regenerate
-`tracepoint-demo-ebpf/src/vmlinux.rs` with `aya-tool` and rebuild. See `doc/operations.md` for the
-exact regeneration command.
+A verifier error at load time can mean that Aya's CO-RE (Compile Once, Run Everywhere) support
+cannot adapt the program to your kernel's BTF. Try
+[regenerating the BTF bindings](doc/operations.md#regenerating-btf-bindings) with `aya-tool`, then
+rebuild.
 
 ## Tests
 
@@ -73,16 +66,8 @@ cargo clippy -- -D warnings
 cargo fmt --all -- --check
 ```
 
-To exercise the kernel verifier on a live machine, run the optional smoke test as root:
-
-```bash
-TRACEPOINT_DEMO_EBPF_SMOKE_TEST=1 sudo cargo test -p tracepoint-demo --test ebpf_verifier_smoke
-```
-
-That test loads the embedded eBPF object against the current kernel, so it will fail with the
-verifier log if the program stops loading on that host.
-
-This is a manual check and is not part of GitHub Actions CI.
+Run the optional [eBPF verifier smoke test](doc/operations.md#ebpf-verifier-smoke-test)
+to check whether the current kernel can load the embedded programs.
 
 ## License
 
