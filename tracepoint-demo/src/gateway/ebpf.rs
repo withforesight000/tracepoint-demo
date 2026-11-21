@@ -214,7 +214,8 @@ pub fn seed_proc_state_from_task_iter(
     let mut root_flags = StdHashMap::new();
     let mut children: StdHashMap<u32, Vec<u32>> = StdHashMap::new();
     let mut pid_tty: StdHashMap<u32, String> = StdHashMap::new();
-    for chunk in buf.chunks_exact(mem::size_of::<TaskRel>()) {
+    let (records, _) = buf.as_chunks::<{ mem::size_of::<TaskRel>() }>();
+    for chunk in records {
         let rel: TaskRel = unsafe { ptr::read_unaligned(chunk.as_ptr() as *const TaskRel) };
         if pid_roots_set.contains(&rel.pid) {
             root_flags.entry(rel.pid).or_insert(watch_flags);
