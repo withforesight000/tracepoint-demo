@@ -41,7 +41,20 @@ jobs:
           workspaces: ". -> target"
 
       - name: Install bpf-linker
-        run: cargo install --locked bpf-linker
+        shell: bash
+        env:
+          BPF_LINKER_VERSION: v0.13.0
+          BPF_LINKER_SHA256: 0e9b2b30f68898177f1cb6f0ecbfa909a82479473a49a0ef66529fd088e3e410
+        run: |
+          install_dir="$(mktemp -d "${RUNNER_TEMP}/bpf-linker.XXXXXX")"
+          archive="$install_dir/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+          curl --fail --silent --show-error --location --retry 3 \
+            --output "$archive" \
+            "https://github.com/aya-rs/bpf-linker/releases/download/${BPF_LINKER_VERSION}/${archive##*/}"
+          printf '%s  %s\n' "$BPF_LINKER_SHA256" "$archive" | sha256sum --check
+          tar --zstd -xf "$archive" -C "$install_dir"
+          "$install_dir/bpf-linker" --version
+          printf '%s\n' "$install_dir" >> "$GITHUB_PATH"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
